@@ -1,5 +1,5 @@
 use anyhow::Result;
-use futures::{channel::oneshot, future, prelude::*};
+use futures::{channel::oneshot, future, prelude::*, select_biased};
 use fxhash::FxHashMap;
 use log::warn;
 use netidx::{
@@ -10,7 +10,7 @@ use netidx::{
 use netidx_tools_core::ClientParams;
 use std::collections::{HashMap, HashSet};
 use structopt::StructOpt;
-use tokio::{sync::broadcast, task};
+use tokio::task;
 use zbus::{
     fdo::{DBusProxy, IntrospectableProxy, PropertiesProxy},
     xml, Connection,
@@ -58,6 +58,7 @@ struct BusPath {
     path: OwnedObjectPath,
 }
 
+/*
 struct Interface {
     base: Path,
     publisher: Publisher,
@@ -85,13 +86,14 @@ impl Interface {
         }
     }
 }
+*/
 
 fn dbus_value_to_netidx_value(v: &zvariant::Value) -> Value {
     use zvariant::Value as ZValue;
     match v {
         ZValue::U8(i) => Value::U32(*i as u32),
         ZValue::Bool(b) if *b => Value::True,
-        ZValue::Bool(b) => Value::False,
+        ZValue::Bool(_) => Value::False,
         ZValue::I16(i) => Value::I32(*i as i32),
         ZValue::U16(i) => Value::U32(*i as u32),
         ZValue::I32(i) => Value::I32(*i),
@@ -99,9 +101,9 @@ fn dbus_value_to_netidx_value(v: &zvariant::Value) -> Value {
         ZValue::I64(i) => Value::I64(*i),
         ZValue::U64(i) => Value::U64(*i),
         ZValue::F64(i) => Value::F64(*i),
-        ZValue::Str(s) => Value::from(s.as_str()),
-        ZValue::Signature(s) => Value::from(s.as_str()),
-        ZValue::ObjectPath(p) => Value::from(p.as_str()),
+        ZValue::Str(s) => Value::from(String::from(s.as_str())),
+        ZValue::Signature(s) => Value::from(String::from(s.as_str())),
+        ZValue::ObjectPath(p) => Value::from(String::from(p.as_str())),
         ZValue::Value(v) => dbus_value_to_netidx_value(&*v),
         ZValue::Array(a) => Value::from(
             a.get()
@@ -109,7 +111,11 @@ fn dbus_value_to_netidx_value(v: &zvariant::Value) -> Value {
                 .map(dbus_value_to_netidx_value)
                 .collect::<Vec<_>>(),
         ),
-        ZValue::Dict(_) => Value::from("<dict>"),
+        ZValue::Dict(d) => Value::from(
+            d.iter_raw()
+                .map(|(k, v)| (dbus_value_to_netidx_value(k), dbus_value_to_netidx_value(v)))
+                .collect::<Vec<_>>(),
+        ),
         ZValue::Structure(s) => Value::from(
             s.fields()
                 .into_iter()
@@ -125,7 +131,6 @@ fn dbus_value_to_netidx_value(v: &zvariant::Value) -> Value {
 }
 
 struct Object {
-    stop: broadcast::Sender<()>,
     children: Vec<Object>,
 }
 
@@ -136,14 +141,14 @@ impl Object {
         dbus_path: BusPath,
         dbus: Connection,
         node: xml::Node,
-        stop: broadcast::Receiver<()>,
+        mut stop: future::Shared<oneshot::Receiver<()>>,
     ) -> Result<()> {
         let proxy = PropertiesProxy::builder(&dbus)
             .destination(&dbus_path.connection)?
             .path(&dbus_path.path)?
             .build()
             .await?;
-        let changes = proxy.receive_properties_changed().await?;
+        let mut changes = proxy.receive_properties_changed().await?;
         let mut properties = future::join_all(
             node.interfaces()
                 .into_iter()
@@ -173,6 +178,35 @@ impl Object {
         .await
         .into_iter()
         .collect::<Result<FxHashMap<_, _>>>()?;
+        loop {
+            let mut batch = publisher.start_batch();
+            select_biased! {
+                _ = stop => break,
+                change = changes.select_next_some() => {
+                    if let Ok(args) = change.args() {
+                        if let Some(intf) = properties.get_mut(args.interface_name.as_str()) {
+                            for inv in &args.invalidated_properties {
+                                intf.remove(*inv);
+                            }
+                            for (name, value) in &args.changed_properties {
+                                match intf.get(*name) {
+                                    Some(val) => val.update(&mut batch, dbus_value_to_netidx_value(value)),
+                                    None => {
+                                        let path = base.append(args.interface_name.as_str()).append(name);
+                                        let val = publisher.publish(path, dbus_value_to_netidx_value(value))?;
+                                        intf.insert(String::from(*name), val);
+                                    }
+                                }
+                            }
+                            if intf.len() == 0 {
+                                properties.remove(args.interface_name.as_str());
+                            }
+                        }
+                    }
+                }
+                complete => break,
+            }
+        }
         Ok(())
     }
 
@@ -182,8 +216,8 @@ impl Object {
         dbus_path: &BusPath,
         dbus: &Connection,
         node: &xml::Node,
+        stop: future::Shared<oneshot::Receiver<()>>,
     ) -> Result<Object> {
-        let (stop, _) = broadcast::channel(1);
         if node
             .interfaces()
             .iter()
@@ -193,8 +227,8 @@ impl Object {
             let publisher = publisher.clone();
             let dbus_path = dbus_path.clone();
             let dbus = dbus.clone();
-            let stop = stop.subscribe();
             let node = node.clone();
+            let stop = stop.clone();
             task::spawn(async move {
                 if let Err(e) =
                     Self::publish_properties(base, publisher, dbus_path.clone(), dbus, node, stop)
@@ -212,10 +246,10 @@ impl Object {
                     .name()
                     .map(|n| base.append(n))
                     .unwrap_or_else(|| base.clone());
-                Self::new(&base, publisher, dbus_path, dbus, c)
+                Self::new(&base, publisher, dbus_path, dbus, c, stop.clone())
             })
             .collect::<Result<Vec<_>>>()?;
-        Ok(Object { stop, children })
+        Ok(Object { children })
     }
 }
 
@@ -245,15 +279,27 @@ fn print_obj(api: &xml::Node, name: &OwnedBusName, path: &str) {
     }
 }
 
-async fn proxy_bus_name(con: Connection, publisher: Publisher, base: Path, name: OwnedBusName) {
-    let api = match introspect(&con, &name).await {
-        Ok(a) => a,
-        Err(e) => {
-            warn!("failed to introspect {}, {}", &name, e);
-            return;
-        }
-    };
-    print_obj(&api, &name, "/");
+struct ProxiedBusName {
+    root: Object,
+    stop: oneshot::Sender<()>,
+}
+
+impl ProxiedBusName {
+    async fn new(
+        con: Connection,
+        publisher: Publisher,
+        base: Path,
+        name: OwnedBusName,
+    ) -> Result<Self> {
+        let (stop, receiver) = oneshot::channel();
+        let api = introspect(&con, &name).await?;
+        let bus_path = BusPath {
+            connection: name.clone(),
+            path: OwnedObjectPath::default(),
+        };
+        let root = Object::new(&base, &publisher, &bus_path, &con, &api, receiver.shared())?;
+        Ok(ProxiedBusName { root, stop })
+    }
 }
 
 #[tokio::main]
@@ -272,33 +318,42 @@ async fn main() -> Result<()> {
         .chain(dbus.list_names().await?.into_iter())
         .filter(|n| !n.starts_with(":"))
         .collect::<HashSet<_>>();
-    let mut names = names
-        .into_iter()
-        .map(|name| {
-            let jh = task::spawn(proxy_bus_name(
-                con.clone(),
-                publisher.clone(),
-                opts.netidx_base.append(name.as_str()),
-                name.clone(),
-            ));
-            (name, jh)
-        })
-        .collect::<HashMap<_, _>>();
+    let mut names = future::join_all(names.into_iter().map(|name| async {
+        let r = ProxiedBusName::new(
+            con.clone(),
+            publisher.clone(),
+            opts.netidx_base.clone(),
+            name.clone().into(),
+        )
+        .await;
+        (name, r)
+    }))
+    .await
+    .into_iter()
+    .filter_map(|(name, r)| match r {
+        Ok(o) => Some((name, o)),
+        Err(e) => {
+            warn!("failed to proxy bus name {}: {}", name, e);
+            None
+        }
+    })
+    .collect::<FxHashMap<_, _>>();
     while let Some(sig) = name_changes.next().await {
         if let Ok(up) = sig.args() {
             if up.new_owner.is_none() {
-                if let Some(jh) = names.remove(up.name.as_str()) {
-                    jh.abort();
-                }
+                names.remove(up.name.as_str());
             } else if up.old_owner.is_none() && !up.name.starts_with(":") {
                 let name = OwnedBusName::from(up.name);
-                let jh = task::spawn(proxy_bus_name(
+                let r = ProxiedBusName::new(
                     con.clone(),
                     publisher.clone(),
                     opts.netidx_base.append(name.as_str()),
                     name.clone(),
-                ));
-                names.insert(name, jh);
+                ).await;
+                match r {
+                    Err(e) => warn!("failed to proxy bus name {}: {}", name, e),
+                    Ok(o) => { names.insert(name, o); },
+                }
             }
         }
     }
