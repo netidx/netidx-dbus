@@ -12,9 +12,11 @@ debug = false
 [dependencies]
 netidx-tools-core = "0.12"
 netidx = "0.12"
-zbus = { path = "../zbus/zbus", version = "3", default-features = false, features = [ "tokio", "xml" ] }
-zbus_names = {version = "2", path = "../zbus/zbus_names" }
-zvariant = { version = "3", path = "../zbus/zvariant" }
+dbus = {version = "0.9", features = ["futures"]}
+dbus-tokio = "0.7"
+serde = "1"
+serde_derive = "1"
+serde-xml-rs = "0.6"
 futures = "0.3"
 tokio = { version = "1", features = [ "full" ] }
 anyhow = "1"

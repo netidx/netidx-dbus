@@ -1,22 +1,28 @@
+#[macro_use]
+extern crate serde_derive;
+
+mod xml;
 use anyhow::Result;
+use dbus::{
+    arg::{ArgType, RefArg},
+    nonblock::{Proxy, SyncConnection},
+};
 use futures::{channel::oneshot, future, prelude::*, select_biased};
 use fxhash::FxHashMap;
 use log::warn;
 use netidx::{
+    chars::Chars,
     path::Path,
     publisher::{BindCfg, Publisher, Val},
     subscriber::Value,
 };
 use netidx_tools_core::ClientParams;
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use structopt::StructOpt;
 use tokio::task;
-use zbus::{
-    fdo::{DBusProxy, IntrospectableProxy, PropertiesProxy},
-    xml, Connection,
-};
-use zbus_names::{InterfaceName, OwnedBusName, OwnedInterfaceName};
-use zvariant::{OwnedObjectPath, OwnedValue};
 
 #[derive(StructOpt, Debug)]
 struct Params {
@@ -42,20 +48,11 @@ struct Params {
     netidx_base: Path,
 }
 
-async fn introspect(con: &Connection, name: &OwnedBusName) -> Result<xml::Node> {
-    let int = IntrospectableProxy::builder(con)
-        .path("/")?
-        .destination(name)?
-        .build()
+async fn introspect(con: &Proxy<'_, Arc<SyncConnection>>) -> Result<xml::Node> {
+    let (xml,): (String,) = con
+        .method_call("org.DBus.Introspectable", "Introspect", ())
         .await?;
-    let s = int.introspect().await?;
-    Ok(xml::Node::from_reader(s.as_bytes())?)
-}
-
-#[derive(Debug, Clone)]
-struct BusPath {
-    connection: OwnedBusName,
-    path: OwnedObjectPath,
+    Ok(xml::Node::from_reader(xml.as_bytes())?)
 }
 
 /*
@@ -88,45 +85,28 @@ impl Interface {
 }
 */
 
-fn dbus_value_to_netidx_value(v: &zvariant::Value) -> Value {
-    use zvariant::Value as ZValue;
-    match v {
-        ZValue::U8(i) => Value::U32(*i as u32),
-        ZValue::Bool(b) if *b => Value::True,
-        ZValue::Bool(_) => Value::False,
-        ZValue::I16(i) => Value::I32(*i as i32),
-        ZValue::U16(i) => Value::U32(*i as u32),
-        ZValue::I32(i) => Value::I32(*i),
-        ZValue::U32(i) => Value::U32(*i),
-        ZValue::I64(i) => Value::I64(*i),
-        ZValue::U64(i) => Value::U64(*i),
-        ZValue::F64(i) => Value::F64(*i),
-        ZValue::Str(s) => Value::from(String::from(s.as_str())),
-        ZValue::Signature(s) => Value::from(String::from(s.as_str())),
-        ZValue::ObjectPath(p) => Value::from(String::from(p.as_str())),
-        ZValue::Value(v) => dbus_value_to_netidx_value(&*v),
-        ZValue::Array(a) => Value::from(
-            a.get()
-                .into_iter()
-                .map(dbus_value_to_netidx_value)
+fn dbus_value_to_netidx_value<V: RefArg>(v: &V) -> Value {
+    match v.arg_type() {
+        ArgType::Byte => Value::from(*v.as_any().downcast_ref::<u8>().unwrap()),
+        ArgType::Int16 => Value::from(*v.as_any().downcast_ref::<i16>().unwrap()),
+        ArgType::UInt16 => Value::from(*v.as_any().downcast_ref::<u16>().unwrap()),
+        ArgType::Int32 => Value::from(*v.as_any().downcast_ref::<i32>().unwrap()),
+        ArgType::UInt32 => Value::from(*v.as_any().downcast_ref::<u32>().unwrap()),
+        ArgType::Int64 => Value::from(*v.as_any().downcast_ref::<i64>().unwrap()),
+        ArgType::UInt64 => Value::from(*v.as_any().downcast_ref::<u64>().unwrap()),
+        ArgType::Double => Value::from(*v.as_any().downcast_ref::<f64>().unwrap()),
+        ArgType::UnixFd => Value::from("<unix-fd>"),
+        ArgType::Boolean => Value::from(*v.as_any().downcast_ref::<bool>().unwrap()),
+        ArgType::Invalid => Value::Error(Chars::from("invalid")),
+        ArgType::String | ArgType::ObjectPath | ArgType::Signature => {
+            Value::from(String::from(v.as_str().unwrap()))
+        }
+        ArgType::Array | ArgType::DictEntry | ArgType::Variant | ArgType::Struct => Value::from(
+            v.as_iter()
+                .unwrap()
+                .map(|v| dbus_value_to_netidx_value(&v))
                 .collect::<Vec<_>>(),
         ),
-        ZValue::Dict(d) => Value::from(
-            d.iter_raw()
-                .map(|(k, v)| (dbus_value_to_netidx_value(k), dbus_value_to_netidx_value(v)))
-                .collect::<Vec<_>>(),
-        ),
-        ZValue::Structure(s) => Value::from(
-            s.fields()
-                .into_iter()
-                .map(dbus_value_to_netidx_value)
-                .collect::<Vec<_>>(),
-        ),
-        ZValue::Maybe(o) => match o.inner() {
-            None => Value::Null,
-            Some(v) => dbus_value_to_netidx_value(v),
-        },
-        ZValue::Fd(_) => Value::from("<fd>"),
     }
 }
 
@@ -349,10 +329,13 @@ async fn main() -> Result<()> {
                     publisher.clone(),
                     opts.netidx_base.append(name.as_str()),
                     name.clone(),
-                ).await;
+                )
+                .await;
                 match r {
                     Err(e) => warn!("failed to proxy bus name {}: {}", name, e),
-                    Ok(o) => { names.insert(name, o); },
+                    Ok(o) => {
+                        names.insert(name, o);
+                    }
                 }
             }
         }
