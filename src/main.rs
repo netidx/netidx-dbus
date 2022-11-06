@@ -2,12 +2,23 @@
 extern crate serde_derive;
 
 mod xml;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use dbus::{
     arg::{ArgType, RefArg},
-    nonblock::{Proxy, SyncConnection},
+    channel::Token,
+    message::MatchRule,
+    nonblock::{
+        stdintf::org_freedesktop_dbus::{Properties, PropertiesPropertiesChanged},
+        MsgMatch, Proxy, SyncConnection,
+    },
+    strings, Message,
 };
-use futures::{channel::oneshot, future, prelude::*, select_biased};
+use futures::{
+    channel::{mpsc::UnboundedReceiver, oneshot},
+    future,
+    prelude::*,
+    select_biased,
+};
 use fxhash::FxHashMap;
 use log::warn;
 use netidx::{
@@ -20,6 +31,7 @@ use netidx_tools_core::ClientParams;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
+    time::Duration,
 };
 use structopt::StructOpt;
 use tokio::task;
@@ -55,36 +67,6 @@ async fn introspect(con: &Proxy<'_, Arc<SyncConnection>>) -> Result<xml::Node> {
     Ok(xml::Node::from_reader(xml.as_bytes())?)
 }
 
-/*
-struct Interface {
-    base: Path,
-    publisher: Publisher,
-    conn: Connection,
-    object_path: BusPath,
-    iface: xml::Interface,
-    properties: FxHashMap<String, Val>,
-}
-
-impl Interface {
-    async fn new(
-        conn: Connection,
-        publisher: Publisher,
-        base: Path,
-        object_path: BusPath,
-        iface: xml::Interface,
-    ) -> Result<Interface> {
-        let base = base.append(iface.name());
-        if iface.properties().len() > 0 {
-            let proxy = PropertiesProxy::builder(&conn)
-                .destination(&object_path.connection)?
-                .path(&object_path.path)?
-                .build()
-                .await?;
-        }
-    }
-}
-*/
-
 fn dbus_value_to_netidx_value<V: RefArg>(v: &V) -> Value {
     match v.arg_type() {
         ArgType::Byte => Value::from(*v.as_any().downcast_ref::<u8>().unwrap()),
@@ -118,74 +100,84 @@ impl Object {
     async fn publish_properties(
         base: Path,
         publisher: Publisher,
-        dbus_path: BusPath,
-        dbus: Connection,
+        proxy: Proxy<'_, Arc<SyncConnection>>,
         node: xml::Node,
         mut stop: future::Shared<oneshot::Receiver<()>>,
     ) -> Result<()> {
-        let proxy = PropertiesProxy::builder(&dbus)
-            .destination(&dbus_path.connection)?
-            .path(&dbus_path.path)?
-            .build()
-            .await?;
-        let mut changes = proxy.receive_properties_changed().await?;
-        let mut properties = future::join_all(
-            node.interfaces()
-                .into_iter()
-                .map(|i| OwnedInterfaceName::try_from(i.name()))
-                .collect::<zbus_names::Result<Vec<OwnedInterfaceName>>>()?
-                .into_iter()
-                .map(|i| {
-                    let proxy = &proxy;
-                    let publisher = &publisher;
-                    let base = &base;
-                    async move {
-                        let props = proxy
-                            .get_all(i.as_ref())
-                            .await?
-                            .into_iter()
-                            .map(|(name, value)| {
-                                let path = base.append(i.as_str()).append(&name);
-                                let val = publisher
-                                    .publish(path, dbus_value_to_netidx_value(&value.into()))?;
-                                Ok((name, val))
-                            })
-                            .collect::<Result<HashMap<_, _>>>()?;
-                        Ok((i, props))
-                    }
-                }),
-        )
+        let (filter, mut changes): (
+            MsgMatch,
+            UnboundedReceiver<(Message, PropertiesPropertiesChanged)>,
+        ) = proxy
+            .connection
+            .add_match(
+                MatchRule::new()
+                    .with_sender(proxy.destination.clone().into_static())
+                    .with_path(proxy.path.clone().into_static())
+                    .with_interface("org.freedesktop.DBus.Properties"),
+            )
+            .await?
+            .stream();
+        let cleanup = {
+            let connection = proxy.connection.clone();
+            || async move {
+                let _: std::result::Result<_, _> = connection.remove_match(filter.token()).await;
+            }
+        };
+        let mut properties = future::join_all(node.interfaces().into_iter().map(|i| {
+            let proxy = &proxy;
+            let publisher = &publisher;
+            let base = &base;
+            async move {
+                let i = i.name.clone();
+                let props = proxy
+                    .get_all(&i)
+                    .await?
+                    .into_iter()
+                    .map(|(name, value)| {
+                        let path = base.append(&i).append(&name);
+                        let val = publisher.publish(path, dbus_value_to_netidx_value(&value))?;
+                        Ok((name, val))
+                    })
+                    .collect::<Result<HashMap<_, _>>>()?;
+                Ok((i, props))
+            }
+        }))
         .await
         .into_iter()
         .collect::<Result<FxHashMap<_, _>>>()?;
         loop {
             let mut batch = publisher.start_batch();
             select_biased! {
-                _ = stop => break,
-                change = changes.select_next_some() => {
-                    if let Ok(args) = change.args() {
-                        if let Some(intf) = properties.get_mut(args.interface_name.as_str()) {
-                            for inv in &args.invalidated_properties {
-                                intf.remove(*inv);
-                            }
-                            for (name, value) in &args.changed_properties {
-                                match intf.get(*name) {
-                                    Some(val) => val.update(&mut batch, dbus_value_to_netidx_value(value)),
-                                    None => {
-                                        let path = base.append(args.interface_name.as_str()).append(name);
-                                        let val = publisher.publish(path, dbus_value_to_netidx_value(value))?;
-                                        intf.insert(String::from(*name), val);
-                                    }
+                (m, change) = changes.select_next_some() => {
+                    if let Some(intf) = properties.get_mut(&change.interface_name) {
+                        for inv in &change.invalidated_properties {
+                            intf.remove(inv);
+                        }
+                        for (name, value) in change.changed_properties {
+                            match intf.get(&name) {
+                                Some(val) => val.update(&mut batch, dbus_value_to_netidx_value(&value)),
+                                None => {
+                                    let path = base.append(&change.interface_name).append(&name);
+                                    let val = publisher.publish(path, dbus_value_to_netidx_value(&value))?;
+                                    intf.insert(name, val);
                                 }
                             }
-                            if intf.len() == 0 {
-                                properties.remove(args.interface_name.as_str());
-                            }
+                        }
+                        if intf.len() == 0 {
+                            properties.remove(&change.interface_name);
                         }
                     }
                 }
-                complete => break,
+                _ = stop => {
+                    cleanup().await;
+                    break
+                },
+                complete => {
+                    cleanup().await;
+                    break
+                },
             }
+            batch.commit(None).await
         }
         Ok(())
     }
@@ -193,28 +185,25 @@ impl Object {
     fn new(
         base: &Path,
         publisher: &Publisher,
-        dbus_path: &BusPath,
-        dbus: &Connection,
+        proxy: Proxy<'_, Arc<SyncConnection>>,
         node: &xml::Node,
         stop: future::Shared<oneshot::Receiver<()>>,
     ) -> Result<Object> {
         if node
             .interfaces()
             .iter()
-            .any(|i| i.name() == "org.freedesktop.DBus.Properties")
+            .any(|i| i.name.as_str() == "org.freedesktop.DBus.Properties")
         {
             let base = base.clone();
             let publisher = publisher.clone();
-            let dbus_path = dbus_path.clone();
-            let dbus = dbus.clone();
+            let proxy = proxy.clone();
             let node = node.clone();
             let stop = stop.clone();
             task::spawn(async move {
-                if let Err(e) =
-                    Self::publish_properties(base, publisher, dbus_path.clone(), dbus, node, stop)
-                        .await
-                {
-                    warn!("properties publisher for {:?} failed {}", dbus_path, e)
+                let path = proxy.path.clone();
+                let dest = proxy.destination.clone();
+                if let Err(e) = Self::publish_properties(base, publisher, proxy, node, stop).await {
+                    warn!("properties publisher for {}:{} failed {}", dest, path, e)
                 }
             });
         }
@@ -223,19 +212,33 @@ impl Object {
             .into_iter()
             .map(|c| {
                 let base = c
-                    .name()
+                    .name
+                    .as_ref()
                     .map(|n| base.append(n))
                     .unwrap_or_else(|| base.clone());
-                Self::new(&base, publisher, dbus_path, dbus, c, stop.clone())
+                let path = strings::Path::new(
+                    c.name
+                        .as_ref()
+                        .map(|n| format!("{}/{}", proxy.path, n))
+                        .unwrap_or_else(|| String::from(&*proxy.path)),
+                )
+                .map_err(|_| anyhow!("invalid path {}", base))?;
+                let proxy = Proxy::new(
+                    proxy.destination.clone(),
+                    path,
+                    Duration::from_secs(30),
+                    Arc::clone(&proxy.connection),
+                );
+                Self::new(&base, publisher, proxy, c, stop.clone())
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(Object { children })
     }
 }
 
-fn print_obj(api: &xml::Node, name: &OwnedBusName, path: &str) {
+fn print_obj(api: &xml::Node, name: &strings::BusName, path: &str) {
     let interfaces = api.interfaces();
-    let path = if let Some(name) = api.name() {
+    let path = if let Some(name) = api.name.as_ref() {
         if path == "/" {
             format!("/{}", name)
         } else {
@@ -248,10 +251,7 @@ fn print_obj(api: &xml::Node, name: &OwnedBusName, path: &str) {
         let has_properties = iface.properties().len() > 0;
         println!(
             "obj {}:{}, interface {}, properties {}",
-            &name,
-            &path,
-            iface.name(),
-            has_properties
+            &name, &path, &iface.name, has_properties
         );
     }
     for child in api.nodes() {
@@ -266,18 +266,13 @@ struct ProxiedBusName {
 
 impl ProxiedBusName {
     async fn new(
-        con: Connection,
+        proxy: Proxy<'_, Arc<SyncConnection>>,
         publisher: Publisher,
         base: Path,
-        name: OwnedBusName,
     ) -> Result<Self> {
         let (stop, receiver) = oneshot::channel();
-        let api = introspect(&con, &name).await?;
-        let bus_path = BusPath {
-            connection: name.clone(),
-            path: OwnedObjectPath::default(),
-        };
-        let root = Object::new(&base, &publisher, &bus_path, &con, &api, receiver.shared())?;
+        let api = introspect(&proxy).await?;
+        let root = Object::new(&base, &publisher, proxy, &api, receiver.shared())?;
         Ok(ProxiedBusName { root, stop })
     }
 }
@@ -287,9 +282,9 @@ async fn main() -> Result<()> {
     env_logger::init();
     let opts = Params::from_args();
     let (cfg, auth) = opts.common.load();
+    let (dbus, con) = dbus_tokio::connection::new_session_sync()?;
     let publisher = Publisher::new(cfg, auth, opts.bind).await?;
-    let con = Connection::session().await?;
-    let dbus = DBusProxy::new(&con).await?;
+    let dbus = Proxy::new("org.freedesktop.DBus", "/", Duration::from_secs(30), Arc::clone(&con));
     let mut name_changes = dbus.receive_name_owner_changed().await?;
     let names = dbus
         .list_activatable_names()
