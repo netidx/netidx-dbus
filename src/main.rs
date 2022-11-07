@@ -350,9 +350,9 @@ async fn main() -> Result<()> {
     let start_proxying = |name: String| {
         let base = base.append(&name);
         let con = &con;
-        let publisher = &publisher;
+        let publisher = publisher.clone();
         async move {
-            let r = ProxiedBusName::new(con, publisher.clone(), base, name.clone()).await;
+            let r = ProxiedBusName::new(con, publisher, base, name.clone()).await;
             match r {
                 Ok(o) => Some(o),
                 Err(e) => {
