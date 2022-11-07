@@ -4,8 +4,7 @@ extern crate serde_derive;
 mod xml;
 use anyhow::{anyhow, Result};
 use dbus::{
-    arg::{ArgType, RefArg},
-    channel::Token,
+    arg::{self, ArgType, RefArg},
     message::MatchRule,
     nonblock::{
         stdintf::org_freedesktop_dbus::{Properties, PropertiesPropertiesChanged},
@@ -20,11 +19,11 @@ use futures::{
     select_biased,
 };
 use fxhash::FxHashMap;
-use log::warn;
+use log::{error, warn};
 use netidx::{
     chars::Chars,
     path::Path,
-    publisher::{BindCfg, Publisher, Val},
+    publisher::{BindCfg, Publisher},
     subscriber::Value,
 };
 use netidx_tools_core::ClientParams;
@@ -35,6 +34,9 @@ use std::{
 };
 use structopt::StructOpt;
 use tokio::task;
+
+// make this an argument?
+const TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(StructOpt, Debug)]
 struct Params {
@@ -62,23 +64,58 @@ struct Params {
 
 async fn introspect(con: &Proxy<'_, Arc<SyncConnection>>) -> Result<xml::Node> {
     let (xml,): (String,) = con
-        .method_call("org.DBus.Introspectable", "Introspect", ())
+        .method_call("org.freedesktop.DBus.Introspectable", "Introspect", ())
         .await?;
     Ok(xml::Node::from_reader(xml.as_bytes())?)
 }
 
+async fn list_names(con: &Proxy<'_, Arc<SyncConnection>>) -> Result<Vec<String>> {
+    let (names,): (Vec<String>,) = con
+        .method_call("org.freedesktop.DBus", "ListNames", ())
+        .await?;
+    Ok(names)
+}
+
+async fn list_activatable_names(con: &Proxy<'_, Arc<SyncConnection>>) -> Result<Vec<String>> {
+    let (names,): (Vec<String>,) = con
+        .method_call("org.freedesktop.DBus", "ListActivatableNames", ())
+        .await?;
+    Ok(names)
+}
+
+#[derive(Debug, Clone)]
+struct NameOwnerChanged {
+    name: String,
+    old_owner: Option<String>,
+    new_owner: Option<String>,
+}
+
+impl arg::ReadAll for NameOwnerChanged {
+    fn read(i: &mut arg::Iter) -> Result<Self, arg::TypeMismatchError> {
+        let name = i.read()?;
+        let old_owner: String = i.read()?;
+        let new_owner: String = i.read()?;
+        let or_none = |s: String| if s.is_empty() { None } else { Some(s) };
+        Ok(NameOwnerChanged {
+            name,
+            old_owner: or_none(old_owner),
+            new_owner: or_none(new_owner),
+        })
+    }
+}
+
 fn dbus_value_to_netidx_value<V: RefArg>(v: &V) -> Value {
     match v.arg_type() {
-        ArgType::Byte => Value::from(*v.as_any().downcast_ref::<u8>().unwrap()),
-        ArgType::Int16 => Value::from(*v.as_any().downcast_ref::<i16>().unwrap()),
-        ArgType::UInt16 => Value::from(*v.as_any().downcast_ref::<u16>().unwrap()),
-        ArgType::Int32 => Value::from(*v.as_any().downcast_ref::<i32>().unwrap()),
-        ArgType::UInt32 => Value::from(*v.as_any().downcast_ref::<u32>().unwrap()),
-        ArgType::Int64 => Value::from(*v.as_any().downcast_ref::<i64>().unwrap()),
-        ArgType::UInt64 => Value::from(*v.as_any().downcast_ref::<u64>().unwrap()),
-        ArgType::Double => Value::from(*v.as_any().downcast_ref::<f64>().unwrap()),
+        ArgType::Byte => Value::from(v.as_u64().unwrap() as u32),
+        ArgType::Int16 => Value::from(v.as_i64().unwrap() as i32),
+        ArgType::UInt16 => Value::from(v.as_u64().unwrap() as u32),
+        ArgType::Int32 => Value::from(v.as_i64().unwrap() as i32),
+        ArgType::UInt32 => Value::from(v.as_u64().unwrap() as u32),
+        ArgType::Int64 => Value::from(v.as_i64().unwrap()),
+        ArgType::UInt64 => Value::from(v.as_u64().unwrap()),
+        ArgType::Double => Value::from(v.as_f64().unwrap()),
         ArgType::UnixFd => Value::from("<unix-fd>"),
-        ArgType::Boolean => Value::from(*v.as_any().downcast_ref::<bool>().unwrap()),
+        ArgType::Boolean => Value::from(v.as_i64().unwrap() == 1),
         ArgType::Invalid => Value::Error(Chars::from("invalid")),
         ArgType::String | ArgType::ObjectPath | ArgType::Signature => {
             Value::from(String::from(v.as_str().unwrap()))
@@ -93,7 +130,7 @@ fn dbus_value_to_netidx_value<V: RefArg>(v: &V) -> Value {
 }
 
 struct Object {
-    children: Vec<Object>,
+    _children: Vec<Object>,
 }
 
 impl Object {
@@ -148,7 +185,7 @@ impl Object {
         loop {
             let mut batch = publisher.start_batch();
             select_biased! {
-                (m, change) = changes.select_next_some() => {
+                (_, change) = changes.select_next_some() => {
                     if let Some(intf) = properties.get_mut(&change.interface_name) {
                         for inv in &change.invalidated_properties {
                             intf.remove(inv);
@@ -185,7 +222,7 @@ impl Object {
     fn new(
         base: &Path,
         publisher: &Publisher,
-        proxy: Proxy<'_, Arc<SyncConnection>>,
+        proxy: Proxy<'static, Arc<SyncConnection>>,
         node: &xml::Node,
         stop: future::Shared<oneshot::Receiver<()>>,
     ) -> Result<Object> {
@@ -207,7 +244,7 @@ impl Object {
                 }
             });
         }
-        let children = node
+        let _children = node
             .nodes()
             .into_iter()
             .map(|c| {
@@ -226,16 +263,17 @@ impl Object {
                 let proxy = Proxy::new(
                     proxy.destination.clone(),
                     path,
-                    Duration::from_secs(30),
+                    TIMEOUT,
                     Arc::clone(&proxy.connection),
                 );
                 Self::new(&base, publisher, proxy, c, stop.clone())
             })
             .collect::<Result<Vec<_>>>()?;
-        Ok(Object { children })
+        Ok(Object { _children })
     }
 }
 
+/*
 fn print_obj(api: &xml::Node, name: &strings::BusName, path: &str) {
     let interfaces = api.interfaces();
     let path = if let Some(name) = api.name.as_ref() {
@@ -258,22 +296,25 @@ fn print_obj(api: &xml::Node, name: &strings::BusName, path: &str) {
         print_obj(child, name, &path)
     }
 }
+*/
 
 struct ProxiedBusName {
-    root: Object,
-    stop: oneshot::Sender<()>,
+    _root: Object,
+    _stop: oneshot::Sender<()>,
 }
 
 impl ProxiedBusName {
     async fn new(
-        proxy: Proxy<'_, Arc<SyncConnection>>,
+        con: &Arc<SyncConnection>,
         publisher: Publisher,
         base: Path,
+        name: String,
     ) -> Result<Self> {
-        let (stop, receiver) = oneshot::channel();
+        let (_stop, receiver) = oneshot::channel();
+        let proxy = Proxy::new(name, "/", TIMEOUT, con.clone());
         let api = introspect(&proxy).await?;
-        let root = Object::new(&base, &publisher, proxy, &api, receiver.shared())?;
-        Ok(ProxiedBusName { root, stop })
+        let _root = Object::new(&base, &publisher, proxy, &api, receiver.shared())?;
+        Ok(ProxiedBusName { _root, _stop })
     }
 }
 
@@ -283,25 +324,32 @@ async fn main() -> Result<()> {
     let opts = Params::from_args();
     let (cfg, auth) = opts.common.load();
     let (dbus, con) = dbus_tokio::connection::new_session_sync()?;
+    task::spawn(async move {
+        let res = dbus.await;
+        error!("lost connection to dbus {}", res);
+    });
     let publisher = Publisher::new(cfg, auth, opts.bind).await?;
-    let dbus = Proxy::new("org.freedesktop.DBus", "/", Duration::from_secs(30), Arc::clone(&con));
-    let mut name_changes = dbus.receive_name_owner_changed().await?;
-    let names = dbus
-        .list_activatable_names()
+    let dbus = Proxy::new("org.freedesktop.DBus", "/", TIMEOUT, Arc::clone(&con));
+    let dbus_signal_match = con
+        .add_match(
+            MatchRule::new()
+                .with_sender("org.freedesktop.DBus")
+                .with_path("/")
+                .with_type(dbus::MessageType::Signal),
+        )
+        .await?;
+    let token = dbus_signal_match.token();
+    let (dbus_signal_match, mut signals) = dbus_signal_match.msg_stream();
+    let names = list_activatable_names(&dbus)
         .await?
         .into_iter()
-        .chain(dbus.list_names().await?.into_iter())
+        .chain(list_names(&dbus).await?.into_iter())
         .filter(|n| !n.starts_with(":"))
         .collect::<HashSet<_>>();
-    let mut names = future::join_all(names.into_iter().map(|name| async {
-        let r = ProxiedBusName::new(
-            con.clone(),
-            publisher.clone(),
-            opts.netidx_base.clone(),
-            name.clone().into(),
-        )
-        .await;
-        (name, r)
+    let base = opts.netidx_base.clone();
+    let mut names = future::join_all(names.into_iter().map(|n| async {
+        let r = ProxiedBusName::new(&con, publisher.clone(), base.clone(), n.clone()).await;
+        (n, r)
     }))
     .await
     .into_iter()
@@ -313,27 +361,48 @@ async fn main() -> Result<()> {
         }
     })
     .collect::<FxHashMap<_, _>>();
-    while let Some(sig) = name_changes.next().await {
-        if let Ok(up) = sig.args() {
-            if up.new_owner.is_none() {
-                names.remove(up.name.as_str());
-            } else if up.old_owner.is_none() && !up.name.starts_with(":") {
-                let name = OwnedBusName::from(up.name);
-                let r = ProxiedBusName::new(
-                    con.clone(),
-                    publisher.clone(),
-                    opts.netidx_base.append(name.as_str()),
-                    name.clone(),
-                )
-                .await;
-                match r {
-                    Err(e) => warn!("failed to proxy bus name {}: {}", name, e),
-                    Ok(o) => {
-                        names.insert(name, o);
-                    }
+    let start_proxying = |name: String| {
+        let base = base.append(&name);
+        let con = &con;
+        let publisher = &publisher;
+        async move {
+            let r = ProxiedBusName::new(con, publisher.clone(), base, name.clone()).await;
+            match r {
+                Ok(o) => Some(o),
+                Err(e) => {
+                    warn!("failed to proxy bus name {}: {}", name, e);
+                    None
                 }
             }
         }
+    };
+    while let Some(msg) = signals.next().await {
+        match msg.member() {
+            None => (),
+            Some(m) if &*m == "NameOwnerChanged" => {
+                if let Ok(up) = msg.read_all::<NameOwnerChanged>() {
+                    if up.new_owner.is_none() {
+                        names.remove(up.name.as_str());
+                    } else if up.old_owner.is_none() && !up.name.starts_with(":") {
+                        if let Some(o) = start_proxying(up.name.clone()).await {
+                            names.insert(up.name, o);
+                        }
+                    }
+                }
+            }
+            Some(m) if &*m == "ActivatableServicesChanged" => {
+                for name in list_activatable_names(&dbus).await? {
+                    if !names.contains_key(&name) {
+                        if let Some(o) = start_proxying(name.clone()).await {
+                            names.insert(name, o);
+                        }
+                    }
+                }
+            }
+            Some(_) => (),
+        }
     }
+    dbus.connection.remove_match(token).await?;
+    drop(dbus_signal_match);
     Ok(())
 }
