@@ -57,7 +57,7 @@ struct Params {
     #[structopt(
         long = "netidx-base",
         help = "the base path to publish under",
-        default_value = "/local/system/sysfs"
+        default_value = "/local/dbus"
     )]
     netidx_base: Path,
 }
@@ -172,16 +172,25 @@ impl Object {
                     .into_iter()
                     .map(|(name, value)| {
                         let path = base.append(&i).append(&name);
-                        let val = publisher.publish(path, dbus_value_to_netidx_value(&value))?;
+                        let val = publisher
+                            .publish(dbg!(path), dbg!(dbus_value_to_netidx_value(&value)))?;
                         Ok((name, val))
                     })
                     .collect::<Result<HashMap<_, _>>>()?;
-                Ok((i, props))
+                Ok::<_, anyhow::Error>((i, props))
             }
         }))
         .await
         .into_iter()
-        .collect::<Result<FxHashMap<_, _>>>()?;
+            .filter_map(|r| match r {
+                Ok(vals) => Some(vals),
+                Err(e) => {
+                    warn!("couldn't proxy properties for interface {}", e);
+                    None
+                }
+            })
+        .collect::<FxHashMap<_, _>>();
+        dbg!(());
         loop {
             let mut batch = publisher.start_batch();
             select_biased! {
@@ -195,7 +204,7 @@ impl Object {
                                 Some(val) => val.update(&mut batch, dbus_value_to_netidx_value(&value)),
                                 None => {
                                     let path = base.append(&change.interface_name).append(&name);
-                                    let val = publisher.publish(path, dbus_value_to_netidx_value(&value))?;
+                                    let val = publisher.publish(dbg!(path), dbg!(dbus_value_to_netidx_value(&value)))?;
                                     intf.insert(name, val);
                                 }
                             }
@@ -239,8 +248,9 @@ impl Object {
             task::spawn(async move {
                 let path = proxy.path.clone();
                 let dest = proxy.destination.clone();
-                if let Err(e) = Self::publish_properties(base, publisher, proxy, node, stop).await {
-                    warn!("properties publisher for {}:{} failed {}", dest, path, e)
+                match Self::publish_properties(base, publisher, proxy, node, stop).await {
+                    Ok(()) => warn!("properties publisher for {}:{} stopped", dest, path),
+                    Err(e) => warn!("properties publisher for {}:{} failed {}", dest, path, e),
                 }
             });
         }
@@ -256,7 +266,13 @@ impl Object {
                 let path = strings::Path::new(
                     c.name
                         .as_ref()
-                        .map(|n| format!("{}/{}", proxy.path, n))
+                        .map(|n| {
+                            if &*proxy.path == "/" {
+                                format!("/{}", n)
+                            } else {
+                                format!("{}/{}", proxy.path, n)
+                            }
+                        })
                         .unwrap_or_else(|| String::from(&*proxy.path)),
                 )
                 .map_err(|_| anyhow!("invalid path {}", base))?;
@@ -329,6 +345,8 @@ async fn main() -> Result<()> {
         error!("lost connection to dbus {}", res);
     });
     let publisher = Publisher::new(cfg, auth, opts.bind).await?;
+    let base = opts.netidx_base.clone();
+    let _test = publisher.publish(base.append("hello"), Value::Null)?;
     let dbus = Proxy::new("org.freedesktop.DBus", "/", TIMEOUT, Arc::clone(&con));
     let dbus_signal_match = con
         .add_match(
@@ -340,13 +358,19 @@ async fn main() -> Result<()> {
         .await?;
     let token = dbus_signal_match.token();
     let (dbus_signal_match, mut signals) = dbus_signal_match.msg_stream();
+    /* I need to work out how to deal with activatable names
     let names = list_activatable_names(&dbus)
         .await?
         .into_iter()
         .chain(list_names(&dbus).await?.into_iter())
         .filter(|n| !n.starts_with(":"))
         .collect::<HashSet<_>>();
-    let base = opts.netidx_base.clone();
+    */
+    let names = list_names(&dbus)
+        .await?
+        .into_iter()
+        .filter(|n| !n.starts_with(":"))
+        .collect::<HashSet<_>>();
     let start_proxying = |name: String| {
         let base = base.append(&name);
         let con = &con;
@@ -372,6 +396,7 @@ async fn main() -> Result<()> {
     .filter_map(|(name, r)| r.map(move |r| (name, r)))
     .collect::<FxHashMap<_, _>>();
     while let Some(msg) = signals.next().await {
+        dbg!(&msg);
         match msg.member() {
             None => (),
             Some(m) if &*m == "NameOwnerChanged" => {
@@ -385,6 +410,7 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+            /* I need to work out how to deal with activatable names
             Some(m) if &*m == "ActivatableServicesChanged" => {
                 for name in list_activatable_names(&dbus).await? {
                     if !names.contains_key(&name) {
@@ -394,6 +420,7 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+             */
             Some(_) => (),
         }
     }
