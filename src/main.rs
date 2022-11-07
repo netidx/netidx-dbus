@@ -347,20 +347,6 @@ async fn main() -> Result<()> {
         .filter(|n| !n.starts_with(":"))
         .collect::<HashSet<_>>();
     let base = opts.netidx_base.clone();
-    let mut names = future::join_all(names.into_iter().map(|n| async {
-        let r = ProxiedBusName::new(&con, publisher.clone(), base.clone(), n.clone()).await;
-        (n, r)
-    }))
-    .await
-    .into_iter()
-    .filter_map(|(name, r)| match r {
-        Ok(o) => Some((name, o)),
-        Err(e) => {
-            warn!("failed to proxy bus name {}: {}", name, e);
-            None
-        }
-    })
-    .collect::<FxHashMap<_, _>>();
     let start_proxying = |name: String| {
         let base = base.append(&name);
         let con = &con;
@@ -376,6 +362,15 @@ async fn main() -> Result<()> {
             }
         }
     };
+    let mut names = future::join_all(
+        names
+            .into_iter()
+            .map(|n| async { (n.clone(), start_proxying(n).await) }),
+    )
+    .await
+    .into_iter()
+    .filter_map(|(name, r)| r.map(move |r| (name, r)))
+    .collect::<FxHashMap<_, _>>();
     while let Some(msg) = signals.next().await {
         match msg.member() {
             None => (),
