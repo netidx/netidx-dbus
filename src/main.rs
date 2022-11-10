@@ -30,6 +30,7 @@ use netidx_tools_core::ClientParams;
 use std::{
     boxed::Box,
     collections::{HashMap, HashSet},
+    iter,
     pin::Pin,
     sync::Arc,
     time::Duration,
@@ -122,7 +123,21 @@ fn dbus_value_to_netidx_value<V: RefArg>(v: &V) -> Value {
         ArgType::String | ArgType::ObjectPath | ArgType::Signature => {
             Value::from(String::from(v.as_str().unwrap()))
         }
-        ArgType::Array | ArgType::DictEntry | ArgType::Variant | ArgType::Struct => Value::from(
+        ArgType::Variant => {
+            let mut iter = v.as_iter().unwrap().map(|v| dbus_value_to_netidx_value(&v));
+            match iter.next() {
+                None => Value::Null,
+                Some(v0) => match iter.next() {
+                    None => v0,
+                    Some(v1) => Value::from(
+                        iter::once(v0)
+                            .chain(iter::once(v1).chain(iter))
+                            .collect::<Vec<_>>(),
+                    ),
+                },
+            }
+        }
+        ArgType::Array | ArgType::DictEntry | ArgType::Struct => Value::from(
             v.as_iter()
                 .unwrap()
                 .map(|v| dbus_value_to_netidx_value(&v))
@@ -287,7 +302,12 @@ impl Object {
                             TIMEOUT,
                             Arc::clone(&proxy.connection),
                         );
-                        Ok::<_, anyhow::Error>(Self::new(base, publisher.clone(), proxy, stop.clone()))
+                        Ok::<_, anyhow::Error>(Self::new(
+                            base,
+                            publisher.clone(),
+                            proxy,
+                            stop.clone(),
+                        ))
                     })
                     .filter_map(|r| match r {
                         Ok(f) => Some(f),
