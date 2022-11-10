@@ -28,7 +28,9 @@ use netidx::{
 };
 use netidx_tools_core::ClientParams;
 use std::{
+    boxed::Box,
     collections::{HashMap, HashSet},
+    pin::Pin,
     sync::Arc,
     time::Duration,
 };
@@ -150,7 +152,8 @@ impl Object {
                 MatchRule::new()
                     .with_sender(proxy.destination.clone().into_static())
                     .with_path(proxy.path.clone().into_static())
-                    .with_interface("org.freedesktop.DBus.Properties"),
+                    .with_interface("org.freedesktop.DBus.Properties")
+                    .with_member("PropertiesChanged"),
             )
             .await?
             .stream();
@@ -171,6 +174,7 @@ impl Object {
                     .await?
                     .into_iter()
                     .map(|(name, value)| {
+                        dbg!((&name, &value));
                         let path = base.append(&i).append(&name);
                         let val = publisher
                             .publish(dbg!(path), dbg!(dbus_value_to_netidx_value(&value)))?;
@@ -182,15 +186,14 @@ impl Object {
         }))
         .await
         .into_iter()
-            .filter_map(|r| match r {
-                Ok(vals) => Some(vals),
-                Err(e) => {
-                    warn!("couldn't proxy properties for interface {}", e);
-                    None
-                }
-            })
+        .filter_map(|r| match r {
+            Ok(vals) => Some(vals),
+            Err(e) => {
+                warn!("couldn't proxy properties for interface {}", e);
+                None
+            }
+        })
         .collect::<FxHashMap<_, _>>();
-        dbg!(());
         loop {
             let mut batch = publisher.start_batch();
             select_biased! {
@@ -204,7 +207,7 @@ impl Object {
                                 Some(val) => val.update(&mut batch, dbus_value_to_netidx_value(&value)),
                                 None => {
                                     let path = base.append(&change.interface_name).append(&name);
-                                    let val = publisher.publish(dbg!(path), dbg!(dbus_value_to_netidx_value(&value)))?;
+                                    let val = publisher.publish(path, dbus_value_to_netidx_value(&value))?;
                                     intf.insert(name, val);
                                 }
                             }
@@ -229,63 +232,83 @@ impl Object {
     }
 
     fn new(
-        base: &Path,
-        publisher: &Publisher,
+        base: Path,
+        publisher: Publisher,
         proxy: Proxy<'static, Arc<SyncConnection>>,
-        node: &xml::Node,
         stop: future::Shared<oneshot::Receiver<()>>,
-    ) -> Result<Object> {
-        if node
-            .interfaces()
-            .iter()
-            .any(|i| i.name.as_str() == "org.freedesktop.DBus.Properties")
-        {
-            let base = base.clone();
-            let publisher = publisher.clone();
-            let proxy = proxy.clone();
-            let node = node.clone();
-            let stop = stop.clone();
-            task::spawn(async move {
-                let path = proxy.path.clone();
-                let dest = proxy.destination.clone();
-                match Self::publish_properties(base, publisher, proxy, node, stop).await {
-                    Ok(()) => warn!("properties publisher for {}:{} stopped", dest, path),
-                    Err(e) => warn!("properties publisher for {}:{} failed {}", dest, path, e),
-                }
-            });
-        }
-        let _children = node
-            .nodes()
+    ) -> Pin<Box<dyn Future<Output = Result<Object>>>> {
+        Box::into_pin(Box::new(async move {
+            println!("{}:{}", &proxy.destination, &proxy.path);
+            let node = introspect(&proxy).await?;
+            if node
+                .interfaces()
+                .iter()
+                .any(|i| i.name.as_str() == "org.freedesktop.DBus.Properties")
+            {
+                let base = base.clone();
+                let publisher = publisher.clone();
+                let proxy = proxy.clone();
+                let node = node.clone();
+                let stop = stop.clone();
+                task::spawn(async move {
+                    let path = proxy.path.clone();
+                    let dest = proxy.destination.clone();
+                    match Self::publish_properties(base, publisher, proxy, node, stop).await {
+                        Ok(()) => warn!("properties publisher for {}:{} stopped", dest, path),
+                        Err(e) => warn!("properties publisher for {}:{} failed {}", dest, path, e),
+                    }
+                });
+            }
+            let _children = future::join_all(
+                node.nodes()
+                    .into_iter()
+                    .map(|c| {
+                        let base = c
+                            .name
+                            .as_ref()
+                            .map(|n| base.append(n))
+                            .unwrap_or_else(|| base.clone());
+                        let path = strings::Path::new(
+                            c.name
+                                .as_ref()
+                                .map(|n| {
+                                    if &*proxy.path == "/" {
+                                        format!("/{}", n)
+                                    } else {
+                                        format!("{}/{}", proxy.path, n)
+                                    }
+                                })
+                                .unwrap_or_else(|| String::from(&*proxy.path)),
+                        )
+                        .map_err(|_| anyhow!("invalid path {}", base))?;
+                        let proxy = Proxy::new(
+                            proxy.destination.clone(),
+                            path,
+                            TIMEOUT,
+                            Arc::clone(&proxy.connection),
+                        );
+                        Ok::<_, anyhow::Error>(Self::new(base, publisher.clone(), proxy, stop.clone()))
+                    })
+                    .filter_map(|r| match r {
+                        Ok(f) => Some(f),
+                        Err(e) => {
+                            warn!("failed to proxy child {}", e);
+                            None
+                        }
+                    }),
+            )
+            .await
             .into_iter()
-            .map(|c| {
-                let base = c
-                    .name
-                    .as_ref()
-                    .map(|n| base.append(n))
-                    .unwrap_or_else(|| base.clone());
-                let path = strings::Path::new(
-                    c.name
-                        .as_ref()
-                        .map(|n| {
-                            if &*proxy.path == "/" {
-                                format!("/{}", n)
-                            } else {
-                                format!("{}/{}", proxy.path, n)
-                            }
-                        })
-                        .unwrap_or_else(|| String::from(&*proxy.path)),
-                )
-                .map_err(|_| anyhow!("invalid path {}", base))?;
-                let proxy = Proxy::new(
-                    proxy.destination.clone(),
-                    path,
-                    TIMEOUT,
-                    Arc::clone(&proxy.connection),
-                );
-                Self::new(&base, publisher, proxy, c, stop.clone())
+            .filter_map(|r| match r {
+                Ok(o) => Some(o),
+                Err(e) => {
+                    warn!("failed to proxy child {}", e);
+                    None
+                }
             })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(Object { _children })
+            .collect::<Vec<_>>();
+            Ok(Object { _children })
+        }))
     }
 }
 
@@ -328,8 +351,7 @@ impl ProxiedBusName {
     ) -> Result<Self> {
         let (_stop, receiver) = oneshot::channel();
         let proxy = Proxy::new(name, "/", TIMEOUT, con.clone());
-        let api = introspect(&proxy).await?;
-        let _root = Object::new(&base, &publisher, proxy, &api, receiver.shared())?;
+        let _root = Object::new(base, publisher, proxy, receiver.shared()).await?;
         Ok(ProxiedBusName { _root, _stop })
     }
 }
