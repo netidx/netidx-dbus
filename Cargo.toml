@@ -10,6 +10,7 @@ lto = true
 debug = false
 
 [dependencies]
+netidx-protocols = "0.12"
 netidx-tools-core = "0.12"
 netidx = "0.12"
 dbus = {version = "0.9", features = ["futures"]}

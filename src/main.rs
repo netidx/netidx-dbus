@@ -26,6 +26,7 @@ use netidx::{
     publisher::{BindCfg, Publisher},
     subscriber::Value,
 };
+use netidx_protocols::rpc;
 use netidx_tools_core::ClientParams;
 use std::{
     boxed::Box,
@@ -146,11 +147,48 @@ fn dbus_value_to_netidx_value<V: RefArg>(v: &V) -> Value {
     }
 }
 
+enum DbusType {
+    Byte,
+    Bool,
+    Int16,
+    UInt16,
+    Int32,
+    UInt32,
+    Int64,
+    UInt64,
+    Double,
+    UnixFd,
+    String,
+    ObjectPath,
+    Signature,
+    
+}
+
 struct Object {
     _children: Vec<Object>,
 }
 
 impl Object {
+    async fn publish_method(
+        base: Path,
+        publisher: Publisher,
+        proxy: Proxy<'_, Arc<SyncConnection>>,
+        method: xml::Method,
+        mut stop: future::Shared<oneshot::Receiver<()>>
+    ) -> Result<()> {
+        
+    }
+
+    async fn publish_methods(
+        base: Path,
+        publisher: Publisher,
+        proxy: Proxy<'_, Arc<SyncConnection>>,
+        node: xml::Node,
+        mut stop: future::Shared<oneshot::Receiver<()>>
+    ) -> Result<()> {
+        
+    }
+
     async fn publish_properties(
         base: Path,
         publisher: Publisher,
