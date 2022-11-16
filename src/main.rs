@@ -36,6 +36,7 @@ use netidx_tools_core::ClientParams;
 use std::{
     boxed::Box,
     collections::{HashMap, HashSet},
+    fmt::Display,
     iter,
     pin::Pin,
     str::FromStr,
@@ -153,6 +154,81 @@ fn dbus_value_to_netidx_value<V: RefArg>(v: &V) -> Value {
     }
 }
 
+fn netidx_value_to_dbus_value(v: &Value, typ: &DbusType) -> Result<MessageItem> {
+    match typ {
+        DbusType::Bool => Ok(MessageItem::Bool(v.cast_to()?)),
+        DbusType::Byte => Ok(MessageItem::Byte(v.cast_to()?)),
+        DbusType::Int16 => Ok(MessageItem::Int16(v.cast_to()?)),
+        DbusType::UInt16 => Ok(MessageItem::UInt16(v.cast_to()?)),
+        DbusType::Int32 => Ok(MessageItem::Int32(v.cast_to()?)),
+        DbusType::UInt32 => Ok(MessageItem::UInt32(v.cast_to()?)),
+        DbusType::Int64 => Ok(MessageItem::Int64(v.cast_to()?)),
+        DbusType::UInt64 => Ok(MessageItem::UInt64(v.cast_to()?)),
+        DbusType::Double => Ok(MessageItem::Double(v.cast_to()?)),
+        DbusType::Signature => Ok(MessageItem::Signature(
+            strings::Signature::new(v.cast_to::<String>()?)
+                .map_err(|s| anyhow!("invalid signature {}", s))?,
+        )),
+        DbusType::ObjectPath => Ok(MessageItem::ObjectPath(
+            strings::Path::new(v.cast_to::<String>()?)
+                .map_err(|e| anyhow!("invalid object path {}", e))?,
+        )),
+        DbusType::String => Ok(MessageItem::Str(v.cast_to::<String>()?)),
+        DbusType::UnixFd => bail!("can't send unix fds over netidx"),
+        DbusType::Array(t) => {
+            let elts = v
+                .cast_to::<Vec<Value>>()?
+                .into_iter()
+                .map(|v| netidx_value_to_dbus_value(&v, &*t))
+                .collect::<Result<Vec<MessageItem>>>()?;
+            let sig = strings::Signature::new(typ.to_string())
+                .map_err(|s| anyhow!("invalid array signature {}", s))?;
+            Ok(MessageItem::Array(
+                MessageItemArray::new(elts, sig).map_err(|e| anyhow!("{:?}", e))?,
+            ))
+        }
+        DbusType::Dict { key, value } => {
+            let elts = v
+                .cast_to::<Vec<(Value, Value)>>()?
+                .into_iter()
+                .map(|(k, v)| {
+                    let k = netidx_value_to_dbus_value(&k, &*key)?;
+                    let v = netidx_value_to_dbus_value(&v, &*value)?;
+                    Ok((k, v))
+                })
+                .collect::<Result<Vec<(MessageItem, MessageItem)>>>()?;
+            let key = strings::Signature::new(key.to_string())
+                .map_err(|e| anyhow!("invalid dict key signature {}", e))?;
+            let value = strings::Signature::new(value.to_string())
+                .map_err(|e| anyhow!("invalid dict value signature {}", e))?;
+            Ok(MessageItem::Dict(
+                MessageItemDict::new(elts, key, value).map_err(|e| anyhow!("{:?}", e))?,
+            ))
+        }
+        DbusType::Struct(inner) => {
+            let elts = v
+                .cast_to::<Vec<Value>>()?
+                .into_iter()
+                .zip(inner.iter())
+                .map(|(v, typ)| netidx_value_to_dbus_value(&v, typ))
+                .collect::<Result<Vec<MessageItem>>>()?;
+            let tl = inner.len();
+            let el = elts.len();
+            if el != tl {
+                bail!("struct elements mismatch expected {} found {}", tl, el)
+            }
+            Ok(MessageItem::Struct(elts))
+        }
+        DbusType::Variant => match v {
+            Value::I32(i) | Value::Z32(i) => Ok(MessageItem::Variant(Box::new(MessageItem::Int32(i)))),
+            Value::U32(i) | Value::V32(i) => Ok(MessageItem::Variant(Box::new(MessageItem::UInt32(i)))),
+            Value::I64(i) | Value::Z64(i) => Ok(MessageItem::Variant(Box::new(MessageItem::Int64(i)))),
+            Value::U64(i) | Value::V64(i) => Ok(MessageItem::Variant(Box::new(MessageItem::UInt64(i)))),
+            
+        }
+    }
+}
+
 enum DbusType {
     Byte,
     Bool,
@@ -184,6 +260,36 @@ impl FromStr for DbusType {
     }
 }
 
+impl Display for DbusType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Byte => write!(f, "y"),
+            Self::Bool => write!(f, "b"),
+            Self::Int16 => write!(f, "n"),
+            Self::UInt16 => write!(f, "q"),
+            Self::Int32 => write!(f, "i"),
+            Self::UInt32 => write!(f, "u"),
+            Self::Int64 => write!(f, "x"),
+            Self::UInt64 => write!(f, "t"),
+            Self::Double => write!(f, "d"),
+            Self::String => write!(f, "s"),
+            Self::ObjectPath => write!(f, "o"),
+            Self::Signature => write!(f, "g"),
+            Self::Array(inner) => write!(f, "a{}", &*inner),
+            Self::Dict { key, value } => write!(f, "{{{}{}}}", &*key, &*value),
+            Self::Struct(inner) => {
+                write!(f, "(")?;
+                for t in inner {
+                    write!(f, "{}", t)?;
+                }
+                write!(f, ")")
+            }
+            Self::Variant => write!(f, "v"),
+            Self::UnixFd => write!(f, "h"),
+        }
+    }
+}
+
 impl DbusType {
     fn from_bytes(b: &[u8]) -> Result<Self> {
         match b {
@@ -200,6 +306,8 @@ impl DbusType {
             [b's', ..] => Ok(Self::String),
             [b'o', ..] => Ok(Self::ObjectPath),
             [b'g', ..] => Ok(Self::Signature),
+            [b'v', ..] => Ok(Self::Variant),
+            [b'h', ..] => Ok(Self::UnixFd),
             [b'a', tail @ ..] => Ok(Self::Array(Box::new(Self::from_bytes(tail)?))),
             [b'{', s @ .., b'}'] => {
                 if s.len() == 0 {
@@ -269,6 +377,7 @@ impl DbusSignature {
     }
 }
 
+/*
 struct DbusMethodArgs(Vec<MessageItem>);
 
 impl AppendAll for DbusMethodArgs {
@@ -280,10 +389,11 @@ impl AppendAll for DbusMethodArgs {
 }
 
 impl DbusMethodArgs {
-    fn from_sig_and_values(sig: &DbusSignature, vals: impl Iterator<Item = &Value>) -> Result<Self> {
-        
+    fn from_sig_and_values<'a>(sig: &DbusSignature, vals: impl Iterator<Item = &'a Value>) -> Result<Self> {
+
     }
 }
+*/
 
 struct Object {
     _children: Vec<Object>,
