@@ -220,12 +220,45 @@ fn netidx_value_to_dbus_value(v: &Value, typ: &DbusType) -> Result<MessageItem> 
             Ok(MessageItem::Struct(elts))
         }
         DbusType::Variant => match v {
-            Value::I32(i) | Value::Z32(i) => Ok(MessageItem::Variant(Box::new(MessageItem::Int32(i)))),
-            Value::U32(i) | Value::V32(i) => Ok(MessageItem::Variant(Box::new(MessageItem::UInt32(i)))),
-            Value::I64(i) | Value::Z64(i) => Ok(MessageItem::Variant(Box::new(MessageItem::Int64(i)))),
-            Value::U64(i) | Value::V64(i) => Ok(MessageItem::Variant(Box::new(MessageItem::UInt64(i)))),
-            
-        }
+            Value::I32(i) | Value::Z32(i) => {
+                Ok(MessageItem::Variant(Box::new(MessageItem::Int32(*i))))
+            }
+            Value::U32(i) | Value::V32(i) => {
+                Ok(MessageItem::Variant(Box::new(MessageItem::UInt32(*i))))
+            }
+            Value::I64(i) | Value::Z64(i) => {
+                Ok(MessageItem::Variant(Box::new(MessageItem::Int64(*i))))
+            }
+            Value::U64(i) | Value::V64(i) => {
+                Ok(MessageItem::Variant(Box::new(MessageItem::UInt64(*i))))
+            }
+            Value::F32(f) => Ok(MessageItem::Variant(Box::new(MessageItem::Double(
+                (*f) as f64,
+            )))),
+            Value::F64(f) => Ok(MessageItem::Variant(Box::new(MessageItem::Double(*f)))),
+            Value::True | Value::Ok => Ok(MessageItem::Variant(Box::new(MessageItem::Bool(true)))),
+            Value::False | Value::Error(_) | Value::Null => {
+                Ok(MessageItem::Variant(Box::new(MessageItem::Bool(false))))
+            }
+            Value::String(s) => Ok(MessageItem::Variant(Box::new(MessageItem::Str(
+                s.to_string(),
+            )))),
+            Value::Bytes(_) => bail!("can't send raw bytes to dbus"),
+            Value::Duration(_) | Value::DateTime(_) => Ok(MessageItem::Variant(Box::new(
+                MessageItem::Str(v.to_string_naked()),
+            ))),
+            Value::Array(a) => {
+                let elts = a
+                    .iter()
+                    .map(|v| netidx_value_to_dbus_value(v, &DbusType::Variant))
+                    .collect::<Result<Vec<MessageItem>>>()?;
+                let sig =
+                    strings::Signature::new("av").map_err(|e| anyhow!("invalid sig {}", e))?;
+                let a = MessageItemArray::new(elts, sig)
+                    .map_err(|e| anyhow!("invalid array {:?}", e))?;
+                Ok(MessageItem::Variant(Box::new(MessageItem::Array(a))))
+            }
+        },
     }
 }
 
