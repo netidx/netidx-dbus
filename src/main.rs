@@ -2,9 +2,13 @@
 extern crate serde_derive;
 
 mod xml;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use dbus::{
-    arg::{self, ArgType, RefArg},
+    arg::{
+        self,
+        messageitem::{MessageItem, MessageItemArray, MessageItemDict},
+        AppendAll, ArgType, IterAppend, RefArg,
+    },
     message::MatchRule,
     nonblock::{
         stdintf::org_freedesktop_dbus::{Properties, PropertiesPropertiesChanged},
@@ -23,6 +27,7 @@ use log::{error, warn};
 use netidx::{
     chars::Chars,
     path::Path,
+    pool::Pooled,
     publisher::{BindCfg, Publisher},
     subscriber::Value,
 };
@@ -33,6 +38,7 @@ use std::{
     collections::{HashMap, HashSet},
     iter,
     pin::Pin,
+    str::FromStr,
     sync::Arc,
     time::Duration,
 };
@@ -161,7 +167,122 @@ enum DbusType {
     String,
     ObjectPath,
     Signature,
-    
+    Variant,
+    Array(Box<DbusType>),
+    Struct(Vec<DbusType>),
+    Dict {
+        key: Box<DbusType>,
+        value: Box<DbusType>,
+    },
+}
+
+impl FromStr for DbusType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        Self::from_bytes(s.as_bytes())
+    }
+}
+
+impl DbusType {
+    fn from_bytes(b: &[u8]) -> Result<Self> {
+        match b {
+            [] => bail!("expected at least 1 character"),
+            [b'y', ..] => Ok(Self::Byte),
+            [b'b', ..] => Ok(Self::Bool),
+            [b'n', ..] => Ok(Self::Int16),
+            [b'q', ..] => Ok(Self::UInt16),
+            [b'i', ..] => Ok(Self::Int32),
+            [b'u', ..] => Ok(Self::UInt32),
+            [b'x', ..] => Ok(Self::Int64),
+            [b't', ..] => Ok(Self::UInt64),
+            [b'd', ..] => Ok(Self::Double),
+            [b's', ..] => Ok(Self::String),
+            [b'o', ..] => Ok(Self::ObjectPath),
+            [b'g', ..] => Ok(Self::Signature),
+            [b'a', tail @ ..] => Ok(Self::Array(Box::new(Self::from_bytes(tail)?))),
+            [b'{', s @ .., b'}'] => {
+                if s.len() == 0 {
+                    bail!("empty dict")
+                }
+                let mut s = s;
+                let key = Box::new(Self::from_bytes(s)?);
+                s = &s[key.len()..];
+                let value = Box::new(Self::from_bytes(s)?);
+                s = &s[value.len()..];
+                if !s.is_empty() {
+                    bail!("dict must contain exactly two types")
+                }
+                Ok(Self::Dict { key, value })
+            }
+            [b'(', s @ .., b')'] => {
+                if s.len() == 0 {
+                    bail!("empty struct type")
+                }
+                let mut elts = Vec::new();
+                let mut s = s;
+                while !s.is_empty() {
+                    let elt = Self::from_bytes(s)?;
+                    s = &s[elt.len()..];
+                    elts.push(elt);
+                }
+                Ok(Self::Struct(elts))
+            }
+            _ => bail!("invalid dbus type"),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Byte
+            | Self::Bool
+            | Self::Int16
+            | Self::UInt16
+            | Self::Int32
+            | Self::UInt32
+            | Self::Int64
+            | Self::UInt64
+            | Self::Double
+            | Self::String
+            | Self::ObjectPath
+            | Self::Signature
+            | Self::UnixFd
+            | Self::Variant => 1,
+            Self::Array(elt) => 1 + Self::len(&elt),
+            Self::Struct(elts) => 2 + elts.iter().map(Self::len).sum::<usize>(),
+            Self::Dict { key, value } => 2 + Self::len(key) + Self::len(value),
+        }
+    }
+}
+
+struct DbusSignature(Vec<DbusType>);
+
+impl DbusSignature {
+    fn from_bytes(mut b: &[u8]) -> Result<Self> {
+        let mut elts = Vec::new();
+        while b.len() != 0 && b != [0u8] {
+            let t = DbusType::from_bytes(b)?;
+            b = &b[t.len()..];
+            elts.push(t);
+        }
+        Ok(DbusSignature(elts))
+    }
+}
+
+struct DbusMethodArgs(Vec<MessageItem>);
+
+impl AppendAll for DbusMethodArgs {
+    fn append(&self, i: &mut IterAppend) {
+        for v in &self.0 {
+            v.append(i);
+        }
+    }
+}
+
+impl DbusMethodArgs {
+    fn from_sig_and_values(sig: &DbusSignature, vals: impl Iterator<Item = &Value>) -> Result<Self> {
+        
+    }
 }
 
 struct Object {
@@ -174,9 +295,8 @@ impl Object {
         publisher: Publisher,
         proxy: Proxy<'_, Arc<SyncConnection>>,
         method: xml::Method,
-        mut stop: future::Shared<oneshot::Receiver<()>>
+        mut stop: future::Shared<oneshot::Receiver<()>>,
     ) -> Result<()> {
-        
     }
 
     async fn publish_methods(
@@ -184,9 +304,8 @@ impl Object {
         publisher: Publisher,
         proxy: Proxy<'_, Arc<SyncConnection>>,
         node: xml::Node,
-        mut stop: future::Shared<oneshot::Receiver<()>>
+        mut stop: future::Shared<oneshot::Receiver<()>>,
     ) -> Result<()> {
-        
     }
 
     async fn publish_properties(
