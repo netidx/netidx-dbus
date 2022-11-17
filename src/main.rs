@@ -22,7 +22,7 @@ use futures::{
     prelude::*,
     select_biased,
 };
-use fxhash::FxHashMap;
+use fxhash::{FxHashMap, FxHashSet};
 use log::{error, warn};
 use netidx::{
     chars::Chars,
@@ -396,24 +396,10 @@ impl DbusType {
     }
 }
 
-struct DbusSignature(Vec<DbusType>);
-
-impl DbusSignature {
-    fn from_bytes(mut b: &[u8]) -> Result<Self> {
-        let mut elts = Vec::new();
-        while b.len() != 0 && b != [0u8] {
-            let t = DbusType::from_bytes(b)?;
-            b = &b[t.len()..];
-            elts.push(t);
-        }
-        Ok(DbusSignature(elts))
-    }
-}
-
 #[derive(Clone, Copy)]
 enum DbusArgDirection {
     In,
-    Out
+    Out,
 }
 
 struct DbusMethodArgSpec {
@@ -434,7 +420,7 @@ impl<'a> TryFrom<&'a xml::Arg> for DbusMethodArgSpec {
                 Some(ref t) if t == "in" => DbusArgDirection::In,
                 Some(ref t) if t == "out" => DbusArgDirection::Out,
                 Some(d) => bail!("invalid arg direction {}", d),
-            }
+            },
         })
     }
 }
@@ -450,14 +436,22 @@ impl AppendAll for DbusMethodArgs {
 }
 
 impl DbusMethodArgs {
-    fn new<'a>(sig: &DbusSignature, vals: impl Iterator<Item = &'a Value>) -> Result<Self> {
+    fn new<'a>(
+        sig: &Vec<DbusMethodArgSpec>,
+        vals: &mut HashMap<Arc<str>, Pooled<Vec<Value>>>,
+    ) -> Result<Self> {
         let elts = sig
-            .0
             .iter()
-            .zip(vals)
-            .map(|(t, v)| netidx_value_to_dbus_value(v, t))
+            .map(|a| {
+                let mut v = vals
+                    .remove(a.name.as_ref().unwrap().as_str())
+                    .ok_or_else(|| anyhow!("missing argument"))?
+                    .pop()
+                    .ok_or_else(|| anyhow!("empty argument"))?;
+                netidx_value_to_dbus_value(&v, &a.typ)
+            })
             .collect::<Result<Vec<_>>>()?;
-        let sl = sig.0.len();
+        let sl = sig.len();
         let el = elts.len();
         if sl != el {
             bail!("arity mismatch, expected {} received {}", sl, el)
@@ -471,11 +465,72 @@ struct PublishedMethod(rpc::Proc);
 impl PublishedMethod {
     fn new(
         base: Path,
-        publisher: Publisher,
+        publisher: &Publisher,
         proxy: Proxy<'_, Arc<SyncConnection>>,
         method: xml::Method,
     ) -> Result<Self> {
-        let sig = method.args().into_iter().map(|a| )
+        let (mut arg_spec, ret_spec): (Vec<DbusMethodArgSpec>, Vec<DbusMethodArgSpec>) = method
+            .args()
+            .into_iter()
+            .map(DbusMethodArgSpec::try_from)
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .partition(|a| match a.direction {
+                DbusArgDirection::In => true,
+                DbusArgDirection::Out => false,
+            });
+        {
+            let mut uargs = HashSet::new();
+            let mut nargs = 0;
+            for a in &mut arg_spec {
+                loop {
+                    let n = match a.name {
+                        Some(ref n) => n,
+                        None => {
+                            a.name = Some(format!("anon{}", nargs));
+                            nargs += 1;
+                            a.name.as_ref().unwrap()
+                        }
+                    };
+                    if uargs.contains(n) {
+                        a.name.as_mut().unwrap().push('_');
+                    } else {
+                        uargs.insert(n);
+                        break;
+                    }
+                }
+            }
+        }
+        let spec = Arc::new((arg_spec, ret_spec));
+        let base = base.append(&method.name);
+        let proc = rpc::Proc::new(
+            publisher,
+            base,
+            Value::from("dbus procedure"),
+            spec.0
+                .iter()
+                .map(|a| {
+                    (
+                        Arc::from(a.name.as_ref().unwrap().as_str()),
+                        (Value::Null, Value::Null),
+                    )
+                })
+                .collect(),
+            Arc::new(move |_clid, mut args| {
+                let spec = Arc::clone(&spec);
+                Box::pin(async move {
+                    match DbusMethodArgs::new(&spec.0, &mut *args) {
+                        Err(e) => Value::Error(Chars::from(format!("failed to construct dbus args: {}", e))),
+                        Ok(dargs) => {
+                            if !args.is_empty() {
+                                warn!("ignoring extra args in method call {}", args)
+                            }
+                            
+                        }
+                    }
+                })
+            }),
+        )?;
     }
 }
 
