@@ -31,7 +31,7 @@ use netidx::{
     publisher::{BindCfg, Publisher},
     subscriber::Value,
 };
-use netidx_protocols::rpc;
+use netidx_protocols::rpc::server as rpc;
 use netidx_tools_core::ClientParams;
 use std::{
     boxed::Box,
@@ -410,7 +410,35 @@ impl DbusSignature {
     }
 }
 
-/*
+#[derive(Clone, Copy)]
+enum DbusArgDirection {
+    In,
+    Out
+}
+
+struct DbusMethodArgSpec {
+    name: Option<String>,
+    typ: DbusType,
+    direction: DbusArgDirection,
+}
+
+impl<'a> TryFrom<&'a xml::Arg> for DbusMethodArgSpec {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &'a xml::Arg) -> Result<Self> {
+        Ok(Self {
+            name: value.name.clone(),
+            typ: DbusType::from_str(&value.typ)?,
+            direction: match value.direction {
+                None => DbusArgDirection::In,
+                Some(ref t) if t == "in" => DbusArgDirection::In,
+                Some(ref t) if t == "out" => DbusArgDirection::Out,
+                Some(d) => bail!("invalid arg direction {}", d),
+            }
+        })
+    }
+}
+
 struct DbusMethodArgs(Vec<MessageItem>);
 
 impl AppendAll for DbusMethodArgs {
@@ -422,33 +450,47 @@ impl AppendAll for DbusMethodArgs {
 }
 
 impl DbusMethodArgs {
-    fn from_sig_and_values<'a>(sig: &DbusSignature, vals: impl Iterator<Item = &'a Value>) -> Result<Self> {
-
+    fn new<'a>(sig: &DbusSignature, vals: impl Iterator<Item = &'a Value>) -> Result<Self> {
+        let elts = sig
+            .0
+            .iter()
+            .zip(vals)
+            .map(|(t, v)| netidx_value_to_dbus_value(v, t))
+            .collect::<Result<Vec<_>>>()?;
+        let sl = sig.0.len();
+        let el = elts.len();
+        if sl != el {
+            bail!("arity mismatch, expected {} received {}", sl, el)
+        }
+        Ok(Self(elts))
     }
 }
-*/
+
+struct PublishedMethod(rpc::Proc);
+
+impl PublishedMethod {
+    fn new(
+        base: Path,
+        publisher: Publisher,
+        proxy: Proxy<'_, Arc<SyncConnection>>,
+        method: xml::Method,
+    ) -> Result<Self> {
+        let sig = method.args().into_iter().map(|a| )
+    }
+}
 
 struct Object {
     _children: Vec<Object>,
 }
 
 impl Object {
-    async fn publish_method(
-        base: Path,
-        publisher: Publisher,
-        proxy: Proxy<'_, Arc<SyncConnection>>,
-        method: xml::Method,
-        mut stop: future::Shared<oneshot::Receiver<()>>,
-    ) -> Result<()> {
-    }
-
     async fn publish_methods(
         base: Path,
         publisher: Publisher,
         proxy: Proxy<'_, Arc<SyncConnection>>,
         node: xml::Node,
-        mut stop: future::Shared<oneshot::Receiver<()>>,
-    ) -> Result<()> {
+    ) -> Result<Vec<PublishedMethod>> {
+        unimplemented!()
     }
 
     async fn publish_properties(

@@ -1,11 +1,9 @@
-// This code is based on zbus::xml, but it has been significantly modified
+// This code is based on zbus::xml, but it has been significantly
+// modified
 
 use anyhow::Result;
 use serde_xml_rs::{from_reader, from_str, to_writer};
 use std::io::{Read, Write};
-
-// note: serde-xml-rs doesn't handle nicely interleaved elements, so we have to use enums:
-// https://github.com/RReverser/serde-xml-rs/issues/55
 
 macro_rules! get_vec {
     ($vec:expr, $kind:path) => {
