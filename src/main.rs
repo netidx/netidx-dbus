@@ -531,6 +531,7 @@ impl ProxiedMethod {
             ret_spec: Vec<DbusMethodArgSpec>,
             interface: String,
             method: String,
+            proxy: Proxy<'static, Arc<SyncConnection>>,
         }
         let base = base.append(&method.name);
         let spec = Arc::new(Spec {
@@ -538,23 +539,22 @@ impl ProxiedMethod {
             ret_spec,
             interface,
             method: method.name,
+            proxy,
         });
         let proc = rpc::Proc::new(
             publisher,
             base,
-            Value::from("dbus procedure"),
+            Value::from("proxied dbus procedure"),
             spec.arg_spec
                 .iter()
                 .map(|a| {
-                    (
-                        Arc::from(a.name.as_ref().unwrap().as_str()),
-                        (Value::Null, Value::Null),
-                    )
+                    let name = Arc::from(a.name.as_ref().unwrap().as_str());
+                    let spec = (Value::Null, Value::Null);
+                    (name, spec)
                 })
                 .collect(),
             Arc::new(move |_clid, mut args| {
                 let spec = Arc::clone(&spec);
-                let proxy = proxy.clone();
                 Box::pin(async move {
                     match DbusMethodArgs::new(&spec.arg_spec, &mut *args) {
                         Err(e) => Value::Error(Chars::from(format!(
@@ -566,7 +566,7 @@ impl ProxiedMethod {
                                 warn!("ignoring extra args in method call")
                             }
                             let r: MethodReply<DbusMethodRet> =
-                                proxy.method_call(&spec.interface, &spec.method, dargs);
+                                spec.proxy.method_call(&spec.interface, &spec.method, dargs);
                             match r.await {
                                 Err(e) => {
                                     Value::Error(Chars::from(format!("method call failed: {}", e)))
@@ -583,17 +583,38 @@ impl ProxiedMethod {
 }
 
 struct Object {
+    _methods: Vec<ProxiedMethod>,
     _children: Vec<Object>,
 }
 
 impl Object {
-    async fn publish_methods(
-        base: Path,
-        publisher: Publisher,
-        proxy: Proxy<'_, Arc<SyncConnection>>,
-        node: xml::Node,
-    ) -> Result<Vec<ProxiedMethod>> {
-        unimplemented!()
+    fn publish_methods(
+        base: &Path,
+        publisher: &Publisher,
+        proxy: &Proxy<'static, Arc<SyncConnection>>,
+        node: &xml::Node,
+    ) -> Vec<ProxiedMethod> {
+        node.interfaces()
+            .into_iter()
+            .flat_map(|i| {
+                i.methods().into_iter().filter_map(|m| {
+                    let base = base.append(&i.name);
+                    match ProxiedMethod::new(
+                        base.clone(),
+                        publisher,
+                        proxy.clone(),
+                        i.name.clone(),
+                        m.clone(),
+                    ) {
+                        Ok(p) => Some(p),
+                        Err(e) => {
+                            warn!("failed to proxy method {} {}", base, e);
+                            None
+                        }
+                    }
+                })
+            })
+            .collect()
     }
 
     async fn publish_properties(
@@ -719,6 +740,7 @@ impl Object {
                     }
                 });
             }
+            let _methods = Self::publish_methods(&base, &publisher, &proxy, &node);
             let _children = future::join_all(
                 node.nodes()
                     .into_iter()
@@ -772,7 +794,10 @@ impl Object {
                 }
             })
             .collect::<Vec<_>>();
-            Ok(Object { _children })
+            Ok(Object {
+                _methods,
+                _children,
+            })
         }))
     }
 }
