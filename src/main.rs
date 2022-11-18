@@ -446,7 +446,7 @@ impl DbusMethodArgs {
         let elts = sig
             .iter()
             .map(|a| {
-                let mut v = vals
+                let v = vals
                     .remove(a.name.as_ref().unwrap().as_str())
                     .ok_or_else(|| anyhow!("missing argument"))?
                     .pop()
@@ -547,15 +547,23 @@ impl ProxiedMethod {
             method: method.name,
             proxy,
         });
+        let rtype_desc = {
+            use std::fmt::Write;
+            let mut s = String::with_capacity(8);
+            for a in &spec.ret_spec {
+                let _ = write!(s, "{}", a.typ);
+            }
+            s
+        };
         let proc = rpc::Proc::new(
             publisher,
             base,
-            Value::from("proxied dbus procedure"),
+            Value::from(format!("proxied dbus procedure type: {}", rtype_desc)),
             spec.arg_spec
                 .iter()
                 .map(|a| {
                     let name = Arc::from(a.name.as_ref().unwrap().as_str());
-                    let spec = (Value::Null, Value::Null);
+                    let spec = (Value::from(a.typ.to_string()), Value::Null);
                     (name, spec)
                 })
                 .collect(),
