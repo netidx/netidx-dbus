@@ -718,7 +718,6 @@ impl Object {
         stop: future::Shared<oneshot::Receiver<()>>,
     ) -> Pin<Box<dyn Future<Output = Result<Object>>>> {
         Box::into_pin(Box::new(async move {
-            println!("{}:{}", &proxy.destination, &proxy.path);
             let node = introspect(&proxy).await?;
             if node
                 .interfaces()
@@ -832,7 +831,6 @@ async fn main() -> Result<()> {
     });
     let publisher = Publisher::new(cfg, auth, opts.bind).await?;
     let base = opts.netidx_base.clone();
-    let _test = publisher.publish(base.append("hello"), Value::Null)?;
     let dbus = Proxy::new("org.freedesktop.DBus", "/", TIMEOUT, Arc::clone(&con));
     let dbus_signal_match = con
         .add_match(
