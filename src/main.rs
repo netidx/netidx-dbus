@@ -598,7 +598,7 @@ impl Object {
             .into_iter()
             .flat_map(|i| {
                 i.methods().into_iter().filter_map(|m| {
-                    let base = base.append(&i.name);
+                    let base = base.append(&i.name).append("methods");
                     match ProxiedMethod::new(
                         base.clone(),
                         publisher,
@@ -655,10 +655,9 @@ impl Object {
                     .await?
                     .into_iter()
                     .map(|(name, value)| {
-                        dbg!((&name, &value));
-                        let path = base.append(&i).append(&name);
+                        let path = base.append(&i).append("properties").append(&name);
                         let val = publisher
-                            .publish(dbg!(path), dbg!(dbus_value_to_netidx_value(&value)))?;
+                            .publish(path, dbus_value_to_netidx_value(&value))?;
                         Ok((name, val))
                     })
                     .collect::<Result<HashMap<_, _>>>()?;
@@ -802,31 +801,6 @@ impl Object {
     }
 }
 
-/*
-fn print_obj(api: &xml::Node, name: &strings::BusName, path: &str) {
-    let interfaces = api.interfaces();
-    let path = if let Some(name) = api.name.as_ref() {
-        if path == "/" {
-            format!("/{}", name)
-        } else {
-            format!("{}/{}", path, name)
-        }
-    } else {
-        format!("{}", path)
-    };
-    for iface in &interfaces {
-        let has_properties = iface.properties().len() > 0;
-        println!(
-            "obj {}:{}, interface {}, properties {}",
-            &name, &path, &iface.name, has_properties
-        );
-    }
-    for child in api.nodes() {
-        print_obj(child, name, &path)
-    }
-}
-*/
-
 struct ProxiedBusName {
     _root: Object,
     _stop: oneshot::Sender<()>,
@@ -908,7 +882,6 @@ async fn main() -> Result<()> {
     .filter_map(|(name, r)| r.map(move |r| (name, r)))
     .collect::<FxHashMap<_, _>>();
     while let Some(msg) = signals.next().await {
-        dbg!(&msg);
         match msg.member() {
             None => (),
             Some(m) if &*m == "NameOwnerChanged" => {
