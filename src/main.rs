@@ -7,12 +7,12 @@ use dbus::{
     arg::{
         self,
         messageitem::{MessageItem, MessageItemArray, MessageItemDict},
-        AppendAll, ArgType, IterAppend, RefArg,
+        AppendAll, ArgType, IterAppend, ReadAll, RefArg,
     },
     message::MatchRule,
     nonblock::{
         stdintf::org_freedesktop_dbus::{Properties, PropertiesPropertiesChanged},
-        MsgMatch, Proxy, SyncConnection,
+        MethodReply, MsgMatch, Proxy, SyncConnection,
     },
     strings, Message,
 };
@@ -22,7 +22,7 @@ use futures::{
     prelude::*,
     select_biased,
 };
-use fxhash::{FxHashMap, FxHashSet};
+use fxhash::FxHashMap;
 use log::{error, warn};
 use netidx::{
     chars::Chars,
@@ -156,27 +156,28 @@ fn dbus_value_to_netidx_value<V: RefArg>(v: &V) -> Value {
 
 fn netidx_value_to_dbus_value(v: &Value, typ: &DbusType) -> Result<MessageItem> {
     match typ {
-        DbusType::Bool => Ok(MessageItem::Bool(v.cast_to()?)),
-        DbusType::Byte => Ok(MessageItem::Byte(v.cast_to()?)),
-        DbusType::Int16 => Ok(MessageItem::Int16(v.cast_to()?)),
-        DbusType::UInt16 => Ok(MessageItem::UInt16(v.cast_to()?)),
-        DbusType::Int32 => Ok(MessageItem::Int32(v.cast_to()?)),
-        DbusType::UInt32 => Ok(MessageItem::UInt32(v.cast_to()?)),
-        DbusType::Int64 => Ok(MessageItem::Int64(v.cast_to()?)),
-        DbusType::UInt64 => Ok(MessageItem::UInt64(v.cast_to()?)),
-        DbusType::Double => Ok(MessageItem::Double(v.cast_to()?)),
+        DbusType::Bool => Ok(MessageItem::Bool(v.clone().cast_to()?)),
+        DbusType::Byte => Ok(MessageItem::Byte(v.clone().cast_to()?)),
+        DbusType::Int16 => Ok(MessageItem::Int16(v.clone().cast_to()?)),
+        DbusType::UInt16 => Ok(MessageItem::UInt16(v.clone().cast_to()?)),
+        DbusType::Int32 => Ok(MessageItem::Int32(v.clone().cast_to()?)),
+        DbusType::UInt32 => Ok(MessageItem::UInt32(v.clone().cast_to()?)),
+        DbusType::Int64 => Ok(MessageItem::Int64(v.clone().cast_to()?)),
+        DbusType::UInt64 => Ok(MessageItem::UInt64(v.clone().cast_to()?)),
+        DbusType::Double => Ok(MessageItem::Double(v.clone().cast_to()?)),
         DbusType::Signature => Ok(MessageItem::Signature(
-            strings::Signature::new(v.cast_to::<String>()?)
+            strings::Signature::new(v.clone().cast_to::<String>()?)
                 .map_err(|s| anyhow!("invalid signature {}", s))?,
         )),
         DbusType::ObjectPath => Ok(MessageItem::ObjectPath(
-            strings::Path::new(v.cast_to::<String>()?)
+            strings::Path::new(v.clone().cast_to::<String>()?)
                 .map_err(|e| anyhow!("invalid object path {}", e))?,
         )),
-        DbusType::String => Ok(MessageItem::Str(v.cast_to::<String>()?)),
+        DbusType::String => Ok(MessageItem::Str(v.clone().cast_to::<String>()?)),
         DbusType::UnixFd => bail!("can't send unix fds over netidx"),
         DbusType::Array(t) => {
             let elts = v
+                .clone()
                 .cast_to::<Vec<Value>>()?
                 .into_iter()
                 .map(|v| netidx_value_to_dbus_value(&v, &*t))
@@ -189,6 +190,7 @@ fn netidx_value_to_dbus_value(v: &Value, typ: &DbusType) -> Result<MessageItem> 
         }
         DbusType::Dict { key, value } => {
             let elts = v
+                .clone()
                 .cast_to::<Vec<(Value, Value)>>()?
                 .into_iter()
                 .map(|(k, v)| {
@@ -207,6 +209,7 @@ fn netidx_value_to_dbus_value(v: &Value, typ: &DbusType) -> Result<MessageItem> 
         }
         DbusType::Struct(inner) => {
             let elts = v
+                .clone()
                 .cast_to::<Vec<Value>>()?
                 .into_iter()
                 .zip(inner.iter())
@@ -415,7 +418,7 @@ impl<'a> TryFrom<&'a xml::Arg> for DbusMethodArgSpec {
         Ok(Self {
             name: value.name.clone(),
             typ: DbusType::from_str(&value.typ)?,
-            direction: match value.direction {
+            direction: match &value.direction {
                 None => DbusArgDirection::In,
                 Some(ref t) if t == "in" => DbusArgDirection::In,
                 Some(ref t) if t == "out" => DbusArgDirection::Out,
@@ -460,13 +463,34 @@ impl DbusMethodArgs {
     }
 }
 
-struct PublishedMethod(rpc::Proc);
+struct DbusMethodRet(Value);
 
-impl PublishedMethod {
+impl ReadAll for DbusMethodRet {
+    fn read(i: &mut arg::Iter) -> Result<Self, arg::TypeMismatchError> {
+        let mut elts = Vec::new();
+        loop {
+            match i.get_refarg() {
+                None => break,
+                Some(a) => {
+                    elts.push(dbus_value_to_netidx_value(&a));
+                    if !i.next() {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(Self(Value::from(elts)))
+    }
+}
+
+struct ProxiedMethod(rpc::Proc);
+
+impl ProxiedMethod {
     fn new(
         base: Path,
         publisher: &Publisher,
-        proxy: Proxy<'_, Arc<SyncConnection>>,
+        proxy: Proxy<'static, Arc<SyncConnection>>,
+        interface: String,
         method: xml::Method,
     ) -> Result<Self> {
         let (mut arg_spec, ret_spec): (Vec<DbusMethodArgSpec>, Vec<DbusMethodArgSpec>) = method
@@ -484,15 +508,16 @@ impl PublishedMethod {
             let mut nargs = 0;
             for a in &mut arg_spec {
                 loop {
-                    let n = match a.name {
-                        Some(ref n) => n,
+                    let n = match &a.name {
+                        Some(n) => n.clone(),
                         None => {
-                            a.name = Some(format!("anon{}", nargs));
+                            let n = format!("anon{}", nargs);
+                            a.name = Some(n.clone());
                             nargs += 1;
-                            a.name.as_ref().unwrap()
+                            n
                         }
                     };
-                    if uargs.contains(n) {
+                    if uargs.contains(&n) {
                         a.name.as_mut().unwrap().push('_');
                     } else {
                         uargs.insert(n);
@@ -501,13 +526,24 @@ impl PublishedMethod {
                 }
             }
         }
-        let spec = Arc::new((arg_spec, ret_spec));
+        struct Spec {
+            arg_spec: Vec<DbusMethodArgSpec>,
+            ret_spec: Vec<DbusMethodArgSpec>,
+            interface: String,
+            method: String,
+        }
         let base = base.append(&method.name);
+        let spec = Arc::new(Spec {
+            arg_spec,
+            ret_spec,
+            interface,
+            method: method.name,
+        });
         let proc = rpc::Proc::new(
             publisher,
             base,
             Value::from("dbus procedure"),
-            spec.0
+            spec.arg_spec
                 .iter()
                 .map(|a| {
                     (
@@ -518,19 +554,31 @@ impl PublishedMethod {
                 .collect(),
             Arc::new(move |_clid, mut args| {
                 let spec = Arc::clone(&spec);
+                let proxy = proxy.clone();
                 Box::pin(async move {
-                    match DbusMethodArgs::new(&spec.0, &mut *args) {
-                        Err(e) => Value::Error(Chars::from(format!("failed to construct dbus args: {}", e))),
+                    match DbusMethodArgs::new(&spec.arg_spec, &mut *args) {
+                        Err(e) => Value::Error(Chars::from(format!(
+                            "failed to construct dbus args: {}",
+                            e
+                        ))),
                         Ok(dargs) => {
                             if !args.is_empty() {
-                                warn!("ignoring extra args in method call {}", args)
+                                warn!("ignoring extra args in method call")
                             }
-                            
+                            let r: MethodReply<DbusMethodRet> =
+                                proxy.method_call(&spec.interface, &spec.method, dargs);
+                            match r.await {
+                                Err(e) => {
+                                    Value::Error(Chars::from(format!("method call failed: {}", e)))
+                                }
+                                Ok(r) => r.0,
+                            }
                         }
                     }
                 })
             }),
         )?;
+        Ok(Self(proc))
     }
 }
 
@@ -544,7 +592,7 @@ impl Object {
         publisher: Publisher,
         proxy: Proxy<'_, Arc<SyncConnection>>,
         node: xml::Node,
-    ) -> Result<Vec<PublishedMethod>> {
+    ) -> Result<Vec<ProxiedMethod>> {
         unimplemented!()
     }
 
