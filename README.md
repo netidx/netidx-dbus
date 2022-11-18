@@ -1,0 +1,3 @@
+# Netidx Dbus
+
+Netidx dbus is a bridge from dbus to netidx. The netidx-dbus daemon will use dbus introspection to discover the tree of objects, interfaces, and properties in dbus, and then it will publish that information to netidx. Properties are modeled as simple netidx values, you can subscribe to them like any other value, and if the property value changes (and the owner of the connection follows the specification and notifies about the change) then the netidx value will update. Methods are modeled as netidx rpcs, calling the netidx rpc causes the dbus method to be called, types are translated in both directions automaticaly.
