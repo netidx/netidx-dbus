@@ -655,9 +655,12 @@ impl Object {
                     .await?
                     .into_iter()
                     .map(|(name, value)| {
-                        let path = base.append(&i).append("properties").append(&name);
-                        let val = publisher
-                            .publish(path, dbus_value_to_netidx_value(&value))?;
+                        let path = base
+                            .append("interfaces")
+                            .append(&i)
+                            .append("properties")
+                            .append(&name);
+                        let val = publisher.publish(path, dbus_value_to_netidx_value(&value))?;
                         Ok((name, val))
                     })
                     .collect::<Result<HashMap<_, _>>>()?;
@@ -686,7 +689,7 @@ impl Object {
                             match intf.get(&name) {
                                 Some(val) => val.update(&mut batch, dbus_value_to_netidx_value(&value)),
                                 None => {
-                                    let path = base.append(&change.interface_name).append(&name);
+                                    let path = base.append("interfaces").append(&change.interface_name).append(&name);
                                     let val = publisher.publish(path, dbus_value_to_netidx_value(&value))?;
                                     intf.insert(name, val);
                                 }
