@@ -11,7 +11,7 @@ org.Some.Connection.To.Dbus
   SomeChildObject
    \ ...
   | 
-  interfaces
+  interfaces (interfaces supported by org.Some.Connection.To.Dbus:/)
    \
     org.Somewhere.Interface
      \
