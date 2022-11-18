@@ -479,7 +479,13 @@ impl ReadAll for DbusMethodRet {
                 }
             }
         }
-        Ok(Self(Value::from(elts)))
+        if elts.len() == 0 {
+            Ok(Self(Value::Null))
+        } else if elts.len() == 1 {
+            Ok(Self(elts.pop().unwrap()))
+        } else {
+            Ok(Self(Value::from(elts)))
+        }
     }
 }
 
@@ -598,7 +604,7 @@ impl Object {
             .into_iter()
             .flat_map(|i| {
                 i.methods().into_iter().filter_map(|m| {
-                    let base = base.append(&i.name).append("methods");
+                    let base = base.append("interfaces").append(&i.name).append("methods");
                     match ProxiedMethod::new(
                         base.clone(),
                         publisher,
