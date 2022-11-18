@@ -547,23 +547,28 @@ impl ProxiedMethod {
             method: method.name,
             proxy,
         });
-        let rtype_desc = {
+        let desc = {
             use std::fmt::Write;
-            let mut s = String::with_capacity(8);
+            let mut desc = String::with_capacity(32);
+            let s = "proxied dbus method";
+            desc.push_str(s);
             for a in &spec.ret_spec {
-                let _ = write!(s, "{}", a.typ);
+                if desc.len() == s.len() {
+                    desc.push_str(" return typ: ");
+                }
+                let _ = write!(desc, "{}", a.typ);
             }
-            s
+            desc
         };
         let proc = rpc::Proc::new(
             publisher,
             base,
-            Value::from(format!("proxied dbus procedure type: {}", rtype_desc)),
+            Value::from(desc),
             spec.arg_spec
                 .iter()
                 .map(|a| {
                     let name = Arc::from(a.name.as_ref().unwrap().as_str());
-                    let spec = (Value::from(a.typ.to_string()), Value::Null);
+                    let spec = (Value::Null, Value::from(a.typ.to_string()));
                     (name, spec)
                 })
                 .collect(),
