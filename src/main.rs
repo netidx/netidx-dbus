@@ -175,19 +175,42 @@ fn netidx_value_to_dbus_value(v: &Value, typ: &DbusType) -> Result<MessageItem> 
         )),
         DbusType::String => Ok(MessageItem::Str(v.clone().cast_to::<String>()?)),
         DbusType::UnixFd => bail!("can't send unix fds over netidx"),
-        DbusType::Array(t) => {
-            let elts = v
-                .clone()
-                .cast_to::<Vec<Value>>()?
-                .into_iter()
-                .map(|v| netidx_value_to_dbus_value(&v, &*t))
-                .collect::<Result<Vec<MessageItem>>>()?;
-            let sig = strings::Signature::new(typ.to_string())
-                .map_err(|s| anyhow!("invalid array signature {}", s))?;
-            Ok(MessageItem::Array(
-                MessageItemArray::new(elts, sig).map_err(|e| anyhow!("{:?}", e))?,
-            ))
-        }
+        DbusType::Array(t) => match &**t {
+            DbusType::Byte => {
+                let elts = match v {
+                    Value::Bytes(b) => b.iter().map(|b| MessageItem::Byte(*b)).collect(),
+                    Value::String(s) => {
+                        s.as_bytes().iter().map(|b| MessageItem::Byte(*b)).collect()
+                    }
+                    Value::Array(elts) => elts
+                        .iter()
+                        .map(|v| Ok(MessageItem::Byte(v.clone().cast_to::<u8>()?)))
+                        .collect::<Result<Vec<MessageItem>>>()?,
+                    v => {
+                        let s: String = v.clone().cast_to::<String>()?;
+                        s.as_bytes().iter().map(|b| MessageItem::Byte(*b)).collect()
+                    }
+                };
+                let sig = strings::Signature::new(typ.to_string())
+                    .map_err(|s| anyhow!("invalid array signature {}", s))?;
+                Ok(MessageItem::Array(
+                    MessageItemArray::new(elts, sig).map_err(|e| anyhow!("{:?}", e))?,
+                ))
+            }
+            t => {
+                let elts = v
+                    .clone()
+                    .cast_to::<Vec<Value>>()?
+                    .into_iter()
+                    .map(|v| netidx_value_to_dbus_value(&v, &*t))
+                    .collect::<Result<Vec<MessageItem>>>()?;
+                let sig = strings::Signature::new(typ.to_string())
+                    .map_err(|s| anyhow!("invalid array signature {}", s))?;
+                Ok(MessageItem::Array(
+                    MessageItemArray::new(elts, sig).map_err(|e| anyhow!("{:?}", e))?,
+                ))
+            }
+        },
         DbusType::Dict { key, value } => {
             let elts = v
                 .clone()
