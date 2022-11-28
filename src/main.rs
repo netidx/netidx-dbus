@@ -791,7 +791,7 @@ impl Object {
                         let base = c
                             .name
                             .as_ref()
-                            .map(|n| base.append(n))
+                            .map(|n| base.append("children").append(n))
                             .unwrap_or_else(|| base.clone());
                         let path = strings::Path::new(
                             c.name
@@ -901,7 +901,7 @@ async fn main() -> Result<()> {
         .filter(|n| !n.starts_with(":"))
         .collect::<HashSet<_>>();
     let start_proxying = |name: String| {
-        let base = base.append(&name);
+        let base = base.append("connections").append(&name);
         let con = &con;
         let publisher = publisher.clone();
         async move {
