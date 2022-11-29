@@ -17,7 +17,10 @@ use dbus::{
     strings, Message,
 };
 use futures::{
-    channel::{mpsc::UnboundedReceiver, oneshot},
+    channel::{
+        mpsc::{self, UnboundedReceiver},
+        oneshot,
+    },
     future,
     prelude::*,
     select_biased,
@@ -28,7 +31,7 @@ use netidx::{
     chars::Chars,
     path::Path,
     pool::Pooled,
-    publisher::{BindCfg, Publisher},
+    publisher::{BindCfg, Id, Publisher, Val},
     subscriber::Value,
 };
 use netidx_protocols::rpc::server as rpc;
@@ -686,62 +689,105 @@ impl Object {
                 let _: std::result::Result<_, _> = connection.remove_match(filter.token()).await;
             }
         };
-        let mut properties = future::join_all(node.interfaces().into_iter().map(|i| {
+        let iface_properties = future::join_all(node.interfaces().into_iter().map(|i| {
             let proxy = &proxy;
-            let publisher = &publisher;
-            let base = &base;
             async move {
                 let i = i.name.clone();
                 let props = proxy
                     .get_all(&i)
-                    .await?
-                    .into_iter()
-                    .map(|(name, value)| {
-                        let path = base
-                            .append("interfaces")
-                            .append(&i)
-                            .append("properties")
-                            .append(&name);
-                        let val = publisher.publish(path, dbus_value_to_netidx_value(&value))?;
-                        Ok((name, val))
-                    })
-                    .collect::<Result<HashMap<_, _>>>()?;
-                Ok::<_, anyhow::Error>((i, props))
+                    .await
+                    .map_err(|e| anyhow!("failed to look up properties for {}, {}", i, e))?;
+                Ok::<(String, arg::PropMap), anyhow::Error>((i, props))
             }
         }))
         .await
         .into_iter()
         .filter_map(|r| match r {
-            Ok(vals) => Some(vals),
+            Ok((i, props)) => Some((i, props)),
             Err(e) => {
-                warn!("couldn't proxy properties for interface {}", e);
+                warn!("{}", e);
                 None
             }
-        })
-        .collect::<FxHashMap<_, _>>();
+        });
+        let (tx_writes, mut rx_writes) = mpsc::channel(3);
+        let mut by_dbus: FxHashMap<String, FxHashMap<String, Val>> = HashMap::default();
+        let mut by_id: FxHashMap<Id, (String, String, DbusType)> = HashMap::default();
+        macro_rules! set_prop {
+            ($i:expr, $name:expr, $value:expr, $by_name:expr) => {{
+                let path = base
+                    .append("interfaces")
+                    .append(&$i)
+                    .append("properties")
+                    .append(&$name);
+                let val = publisher.publish(path, dbus_value_to_netidx_value(&$value))?;
+                let typ = match DbusType::from_str(&$value.signature()) {
+                    Ok(typ) => typ,
+                    Err(e) => {
+                        warn!(
+                            "could not parse property type {}, {} using variant",
+                            $value.signature(),
+                            e
+                        );
+                        DbusType::Variant
+                    }
+                };
+                publisher.writes(val.id(), tx_writes.clone());
+                by_id.insert(val.id(), ($i.clone(), $name.clone(), typ));
+                $by_name.insert($name, val);
+            }};
+        }
+        for (i, props) in iface_properties {
+            let by_name = by_dbus.entry(i.clone()).or_insert_with(HashMap::default);
+            for (name, value) in props {
+                set_prop!(i, name, value, by_name)
+            }
+        }
         loop {
             let mut batch = publisher.start_batch();
             select_biased! {
-                (_, change) = changes.select_next_some() => {
-                    if let Some(intf) = properties.get_mut(&change.interface_name) {
+                mut writes = rx_writes.select_next_some() => {
+                    for write in writes.drain(..) {
+                        match by_id.get(&write.id) {
+                            None => if let Some(r) = write.send_result {
+                                r.send(Value::Error(Chars::from("no such property")))
+                            }
+                            Some((i, name, typ)) => match netidx_value_to_dbus_value(&write.value, &typ) {
+                                Err(e) => if let Some(r) = write.send_result {
+                                    r.send(Value::Error(Chars::from(format!("type conversion failed {}", e))))
+                                },
+                                Ok(v) => if let Err(e) = proxy.set(i, name, arg::Variant(v)).await {
+                                    if let Some(r) = write.send_result {
+                                        r.send(Value::Error(Chars::from(format!("property set error {}", e))))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                (_, change) = changes.select_next_some() => match by_dbus.get_mut(&change.interface_name) {
+                    None => {
+                        let intf = by_dbus.entry(change.interface_name.clone()).or_insert_with(HashMap::default);
+                        for (name, value) in change.changed_properties {
+                            set_prop!(change.interface_name, name, value, intf)
+                        }
+                    }
+                    Some(intf) => {
                         for inv in &change.invalidated_properties {
-                            intf.remove(inv);
+                            if let Some(val) = intf.remove(inv) {
+                                by_id.remove(&val.id());
+                            }
                         }
                         for (name, value) in change.changed_properties {
                             match intf.get(&name) {
                                 Some(val) => val.update(&mut batch, dbus_value_to_netidx_value(&value)),
-                                None => {
-                                    let path = base.append("interfaces").append(&change.interface_name).append(&name);
-                                    let val = publisher.publish(path, dbus_value_to_netidx_value(&value))?;
-                                    intf.insert(name, val);
-                                }
+                                None => set_prop!(change.interface_name, name, value, intf)
                             }
                         }
                         if intf.len() == 0 {
-                            properties.remove(&change.interface_name);
+                            by_dbus.remove(&change.interface_name);
                         }
                     }
-                }
+                },
                 _ = stop => {
                     cleanup().await;
                     break
