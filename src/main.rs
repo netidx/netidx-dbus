@@ -748,16 +748,32 @@ impl Object {
                 mut writes = rx_writes.select_next_some() => {
                     for write in writes.drain(..) {
                         match by_id.get(&write.id) {
-                            None => if let Some(r) = write.send_result {
-                                r.send(Value::Error(Chars::from("no such property")))
+                            None => {
+                                warn!("probably a bug: no such property for {:?}", write.id);
+                                if let Some(r) = write.send_result {
+                                    r.send(Value::Error(Chars::from("no such property")))
+                                }
                             }
                             Some((i, name, typ)) => match netidx_value_to_dbus_value(&write.value, &typ) {
-                                Err(e) => if let Some(r) = write.send_result {
-                                    r.send(Value::Error(Chars::from(format!("type conversion failed {}", e))))
-                                },
-                                Ok(v) => if let Err(e) = proxy.set(i, name, arg::Variant(v)).await {
+                                Err(e) => {
+                                    let m = format!("property type conversion failed {}", e);
+                                    warn!("{}", m);
                                     if let Some(r) = write.send_result {
-                                        r.send(Value::Error(Chars::from(format!("property set error {}", e))))
+                                        r.send(Value::Error(Chars::from(m)))
+                                    }
+                                },
+                                Ok(v) => {
+                                    let r: MethodReply<()> = proxy.method_call(
+                                        "org.freedesktop.DBus.Properties",
+                                        "Set",
+                                        (&i, &name, v)
+                                    );
+                                    if let Err(e) = r.await {
+                                        let m = format!("property set error {}", e);
+                                        warn!("{}", m);
+                                        if let Some(r) = write.send_result {
+                                            r.send(Value::Error(Chars::from(m)))
+                                        }
                                     }
                                 }
                             }
