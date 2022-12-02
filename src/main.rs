@@ -25,13 +25,13 @@ use futures::{
     prelude::*,
     select_biased,
 };
-use fxhash::FxHashMap;
+use fxhash::{FxHashMap, FxHashSet};
 use log::{error, warn};
 use netidx::{
     chars::Chars,
     path::Path,
     pool::Pooled,
-    publisher::{BindCfg, Id, Publisher, Val},
+    publisher::{BindCfg, Id, Publisher, Val, WriteRequest},
     subscriber::Value,
 };
 use netidx_protocols::rpc::server as rpc;
@@ -663,6 +663,7 @@ impl Object {
     }
 
     async fn publish_properties(
+        timeout: Option<Duration>,
         base: Path,
         publisher: Publisher,
         proxy: Proxy<'_, Arc<SyncConnection>>,
@@ -813,12 +814,13 @@ impl Object {
                     break
                 },
             }
-            batch.commit(None).await
+            batch.commit(timeout).await
         }
         Ok(())
     }
 
     async fn publish_signal(
+        timeout: Option<Duration>,
         base: Path,
         publisher: Publisher,
         proxy: Proxy<'_, Arc<SyncConnection>>,
@@ -868,13 +870,14 @@ impl Object {
                 }
                 _ = stop => break Ok(())
             }
-            batch.commit(None).await
+            batch.commit(timeout).await
         };
         cleanup().await;
         r
     }
 
     fn publish_signals(
+        timeout: Option<Duration>,
         base: Path,
         publisher: Publisher,
         proxy: Proxy<'static, Arc<SyncConnection>>,
@@ -901,7 +904,8 @@ impl Object {
                 let s = s.name.clone();
                 let stop = stop.clone();
                 task::spawn(async move {
-                    let r = Self::publish_signal(base, publisher, proxy, i, s, args, stop).await;
+                    let r = Self::publish_signal(timeout, base, publisher, proxy, i, s, args, stop)
+                        .await;
                     if let Err(e) = r {
                         warn!("signal publisher failed {}", e);
                     }
@@ -911,6 +915,7 @@ impl Object {
     }
 
     fn new(
+        timeout: Option<Duration>,
         base: Path,
         publisher: Publisher,
         proxy: Proxy<'static, Arc<SyncConnection>>,
@@ -931,13 +936,16 @@ impl Object {
                 task::spawn(async move {
                     let path = proxy.path.clone();
                     let dest = proxy.destination.clone();
-                    match Self::publish_properties(base, publisher, proxy, node, stop).await {
+                    match Self::publish_properties(timeout, base, publisher, proxy, node, stop)
+                        .await
+                    {
                         Ok(()) => warn!("properties publisher for {}:{} stopped", dest, path),
                         Err(e) => warn!("properties publisher for {}:{} failed {}", dest, path, e),
                     }
                 });
             }
             Self::publish_signals(
+                timeout,
                 base.clone(),
                 publisher.clone(),
                 proxy.clone(),
@@ -974,6 +982,7 @@ impl Object {
                             Arc::clone(&proxy.connection),
                         );
                         Ok::<_, anyhow::Error>(Self::new(
+                            timeout,
                             base,
                             publisher.clone(),
                             proxy,
@@ -1013,6 +1022,7 @@ struct ProxiedBusName {
 
 impl ProxiedBusName {
     async fn new(
+        timeout: Option<Duration>,
         con: &Arc<SyncConnection>,
         publisher: Publisher,
         base: Path,
@@ -1020,8 +1030,67 @@ impl ProxiedBusName {
     ) -> Result<Self> {
         let (_stop, receiver) = oneshot::channel();
         let proxy = Proxy::new(name, "/", TIMEOUT, con.clone());
-        let _root = Object::new(base, publisher, proxy, receiver.shared()).await?;
+        let _root = Object::new(timeout, base, publisher, proxy, receiver.shared()).await?;
         Ok(ProxiedBusName { _root, _stop })
+    }
+}
+
+struct Activatable {
+    by_id: FxHashMap<Id, String>,
+    by_name: FxHashMap<String, Val>,
+    publisher: Publisher,
+    con: Proxy<'static, Arc<SyncConnection>>,
+    activate: mpsc::Sender<Pooled<Vec<WriteRequest>>>,
+    base: Path,
+}
+
+impl Activatable {
+    async fn sync(&mut self) -> Result<()> {
+        let names = list_activatable_names(&self.con)
+            .await?
+            .into_iter()
+            .filter(|n| !n.starts_with(":"))
+            .collect::<FxHashSet<_>>();
+        for name in &names {
+            if !self.by_name.contains_key(name) {
+                let path = self.base.append(name);
+                let val = self.publisher.publish(path, Value::Null)?;
+                let id = val.id();
+                self.publisher.writes(id, self.activate.clone());
+                self.by_name.insert(name.clone(), val);
+                self.by_id.insert(id, name.clone());
+            }
+        }
+        let remove = self
+            .by_name
+            .keys()
+            .filter(|name| !names.contains(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+        for name in remove {
+            if let Some(val) = self.by_name.remove(&name) {
+                self.by_id.remove(&val.id());
+            }
+        }
+        Ok(())
+    }
+
+    async fn new(
+        base: Path,
+        publisher: Publisher,
+        con: Proxy<'static, Arc<SyncConnection>>,
+        activate: mpsc::Sender<Pooled<Vec<WriteRequest>>>,
+    ) -> Result<Self> {
+        let mut t = Self {
+            by_id: HashMap::default(),
+            by_name: HashMap::default(),
+            publisher,
+            con,
+            activate,
+            base,
+        };
+        t.sync().await?;
+        Ok(t)
     }
 }
 
@@ -1029,6 +1098,7 @@ impl ProxiedBusName {
 async fn main() -> Result<()> {
     env_logger::init();
     let opts = Params::from_args();
+    let timeout = opts.timeout.map(Duration::from_secs);
     let (cfg, auth) = opts.common.load();
     let (dbus, con) = dbus_tokio::connection::new_session_sync()?;
     con.set_signal_match_mode(true);
@@ -1049,14 +1119,13 @@ async fn main() -> Result<()> {
         .await?;
     let token = dbus_signal_match.token();
     let (dbus_signal_match, mut signals) = dbus_signal_match.msg_stream();
-    /* I need to work out how to deal with activatable names
-    let names = list_activatable_names(&dbus)
-        .await?
-        .into_iter()
-        .chain(list_names(&dbus).await?.into_iter())
-        .filter(|n| !n.starts_with(":"))
-        .collect::<HashSet<_>>();
-    */
+    let (tx_activate, mut rx_activate) = mpsc::channel(3);
+    let mut activatable = Activatable::new(
+        base.append("activatable"),
+        publisher.clone(),
+        dbus.clone(),
+        tx_activate,
+    ).await?;
     let names = list_names(&dbus)
         .await?
         .into_iter()
@@ -1067,7 +1136,7 @@ async fn main() -> Result<()> {
         let con = &con;
         let publisher = publisher.clone();
         async move {
-            let r = ProxiedBusName::new(con, publisher, base, name.clone()).await;
+            let r = ProxiedBusName::new(timeout, con, publisher, base, name.clone()).await;
             match r {
                 Ok(o) => Some(o),
                 Err(e) => {
@@ -1086,32 +1155,36 @@ async fn main() -> Result<()> {
     .into_iter()
     .filter_map(|(name, r)| r.map(move |r| (name, r)))
     .collect::<FxHashMap<_, _>>();
-    while let Some(msg) = signals.next().await {
-        match msg.member() {
-            None => (),
-            Some(m) if &*m == "NameOwnerChanged" => {
-                if let Ok(up) = msg.read_all::<NameOwnerChanged>() {
-                    if up.new_owner.is_none() {
-                        names.remove(up.name.as_str());
-                    } else if up.old_owner.is_none() && !up.name.starts_with(":") {
-                        if let Some(o) = start_proxying(up.name.clone()).await {
-                            names.insert(up.name, o);
+    loop {
+        select_biased! {
+            msg = signals.select_next_some() => {
+                match msg.member() {
+                    None => (),
+                    Some(m) if &*m == "NameOwnerChanged" => {
+                        if let Ok(up) = msg.read_all::<NameOwnerChanged>() {
+                            if up.new_owner.is_none() {
+                                names.remove(up.name.as_str());
+                            } else if up.old_owner.is_none() && !up.name.starts_with(":") {
+                                if let Some(o) = start_proxying(up.name.clone()).await {
+                                    names.insert(up.name, o);
+                                }
+                            }
                         }
                     }
-                }
-            }
-            /* I need to work out how to deal with activatable names
-            Some(m) if &*m == "ActivatableServicesChanged" => {
-                for name in list_activatable_names(&dbus).await? {
-                    if !names.contains_key(&name) {
-                        if let Some(o) = start_proxying(name.clone()).await {
-                            names.insert(name, o);
+                    Some(m) if &*m == "ActivatableServicesChanged" => {
+                        if let Err(e) = activatable.sync().await {
+                            warn!("failed to sync activatable names {}", e)
                         }
                     }
+                    Some(_) => (),
                 }
             }
-             */
-            Some(_) => (),
+            req = rx_activate.select_next_some() => {
+                if let Err(e) = activatable.activate(req).await {
+                    warn!("could not activate service {}", e);
+                }
+            }
+            complete => break,
         }
     }
     dbus.connection.remove_match(token).await?;
