@@ -1031,6 +1031,7 @@ async fn main() -> Result<()> {
     let opts = Params::from_args();
     let (cfg, auth) = opts.common.load();
     let (dbus, con) = dbus_tokio::connection::new_session_sync()?;
+    con.set_signal_match_mode(true);
     task::spawn(async move {
         let res = dbus.await;
         error!("lost connection to dbus {}", res);
