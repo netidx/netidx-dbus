@@ -1081,7 +1081,7 @@ impl Activatable {
             if let Some(name) = self.by_id.get(&req.id) {
                 let r: result::Result<(i32,), dbus::Error> = self
                     .con
-                    .method_call("org.FreeDesktop.DBus", "StartServiceByName", (name, 0))
+                    .method_call("org.freedesktop.DBus", "StartServiceByName", (name, 0))
                     .await;
                 match r {
                     Err(e) => {
@@ -1151,7 +1151,6 @@ async fn main() -> Result<()> {
         .add_match(
             MatchRule::new()
                 .with_sender("org.freedesktop.DBus")
-                .with_path("/")
                 .with_type(dbus::MessageType::Signal),
         )
         .await?;
