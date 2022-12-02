@@ -2,8 +2,8 @@
 // modified
 
 use anyhow::Result;
-use serde_xml_rs::{from_reader, from_str, to_writer};
-use std::io::{Read, Write};
+use serde_xml_rs::{from_reader, from_str};
+use std::io::Read;
 
 macro_rules! get_vec {
     ($vec:expr, $kind:path) => {
@@ -54,7 +54,7 @@ impl Method {
     }
 
     /// Return the method annotations.
-    pub fn annotations(&self) -> Vec<&Annotation> {
+    pub fn _annotations(&self) -> Vec<&Annotation> {
         get_vec!(self.elems, MethodElement::Annotation)
     }
 }
@@ -82,7 +82,7 @@ impl Signal {
     }
 
     /// Return the signal annotations.
-    pub fn annotations(&self) -> Vec<&Annotation> {
+    pub fn _annotations(&self) -> Vec<&Annotation> {
         get_vec!(self.elems, SignalElement::Annotation)
     }
 }
@@ -128,12 +128,12 @@ impl Interface {
     }
 
     /// Returns the interface properties.
-    pub fn properties(&self) -> Vec<&Property> {
+    pub fn _properties(&self) -> Vec<&Property> {
         get_vec!(self.elems, InterfaceElement::Property)
     }
 
     /// Return the associated annotations.
-    pub fn annotations(&self) -> Vec<&Annotation> {
+    pub fn _annotations(&self) -> Vec<&Annotation> {
         get_vec!(self.elems, InterfaceElement::Annotation)
     }
 }
@@ -158,11 +158,6 @@ impl Node {
     /// Parse the introspection XML document from reader.
     pub fn from_reader<R: Read>(reader: R) -> Result<Node> {
         Ok(from_reader(reader)?)
-    }
-
-    /// Write the XML document to writer.
-    pub fn to_writer<W: Write>(&self, writer: W) -> Result<()> {
-        Ok(to_writer(writer, &self)?)
     }
 
     /// Returns the children nodes.

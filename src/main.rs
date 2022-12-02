@@ -818,6 +818,96 @@ impl Object {
         Ok(())
     }
 
+    async fn publish_signal(
+        base: Path,
+        publisher: Publisher,
+        proxy: Proxy<'_, Arc<SyncConnection>>,
+        interface: String,
+        signal: String,
+        args: Vec<Value>,
+        mut stop: future::Shared<oneshot::Receiver<()>>,
+    ) -> Result<()> {
+        let path = base
+            .append("interfaces")
+            .append(&interface)
+            .append("signals")
+            .append(&signal);
+        let val = publisher.publish(path, Value::Null)?;
+        let (filter, mut signals) = proxy
+            .connection
+            .add_match(
+                MatchRule::new()
+                    .with_sender(proxy.destination.clone().into_static())
+                    .with_path(proxy.path.clone().into_static())
+                    .with_interface(interface.clone())
+                    .with_member(signal.clone()),
+            )
+            .await?
+            .msg_stream();
+        let cleanup = {
+            let connection = proxy.connection.clone();
+            || async move {
+                let _: std::result::Result<_, _> = connection.remove_match(filter.token()).await;
+            }
+        };
+        let r = loop {
+            let mut batch = publisher.start_batch();
+            select_biased! {
+                signal = signals.select_next_some() => {
+                    let elts = Value::from(
+                        args.iter()
+                            .zip(signal.iter_init())
+                            .map(|(a, v)| (a.clone(), dbus_value_to_netidx_value(&v)))
+                            .collect::<Vec<_>>()
+                    );
+                    for cl in publisher.subscribed(&val.id()) {
+                        val.update_subscriber(&mut batch, cl, elts.clone());
+                    }
+                }
+                _ = stop => break Ok(())
+            }
+            batch.commit(None).await
+        };
+        cleanup().await;
+        r
+    }
+
+    fn publish_signals(
+        base: Path,
+        publisher: Publisher,
+        proxy: Proxy<'static, Arc<SyncConnection>>,
+        node: xml::Node,
+        stop: future::Shared<oneshot::Receiver<()>>,
+    ) {
+        for i in node.interfaces() {
+            for s in i.signals() {
+                let args =
+                    s.args()
+                        .into_iter()
+                        .map(|a| {
+                            use rand::Rng;
+                            let name = a.name.clone().unwrap_or_else(|| {
+                                format!("anon{}", rand::thread_rng().gen::<u64>())
+                            });
+                            Value::from(name)
+                        })
+                        .collect::<Vec<_>>();
+                let base = base.clone();
+                let publisher = publisher.clone();
+                let proxy = proxy.clone();
+                let i = i.name.clone();
+                let s = s.name.clone();
+                let stop = stop.clone();
+                task::spawn(async move {
+                    let r = Self::publish_signal(base, publisher, proxy, i, s, args, stop).await;
+                    if let Err(e) = r {
+                        warn!("signal publisher failed {}", e);
+                    }
+                });
+            }
+        }
+    }
+
     fn new(
         base: Path,
         publisher: Publisher,
@@ -845,6 +935,13 @@ impl Object {
                     }
                 });
             }
+            Self::publish_signals(
+                base.clone(),
+                publisher.clone(),
+                proxy.clone(),
+                node.clone(),
+                stop.clone(),
+            );
             let _methods = Self::publish_methods(&base, &publisher, &proxy, &node);
             let _children = future::join_all(
                 node.nodes()
