@@ -42,6 +42,7 @@ use std::{
     fmt::Display,
     iter,
     pin::Pin,
+    result,
     str::FromStr,
     sync::Arc,
     time::Duration,
@@ -1075,6 +1076,43 @@ impl Activatable {
         Ok(())
     }
 
+    async fn activate(&self, mut reqs: Pooled<Vec<WriteRequest>>) {
+        for req in reqs.drain(..) {
+            if let Some(name) = self.by_id.get(&req.id) {
+                let r: result::Result<(i32,), dbus::Error> = self
+                    .con
+                    .method_call("org.FreeDesktop.DBus", "StartServiceByName", (name, 0))
+                    .await;
+                match r {
+                    Err(e) => {
+                        warn!("failed to activate service {}", e);
+                        if let Some(r) = req.send_result {
+                            r.send(Value::Error(Chars::from(format!(
+                                "service activation failed: {}",
+                                e
+                            ))))
+                        }
+                    }
+                    Ok((i,)) if i == 1 => (), // success
+                    Ok((i,)) if i == 2 => {
+                        if let Some(r) = req.send_result {
+                            r.send(Value::Error(Chars::from("service is already running")))
+                        }
+                    }
+                    Ok((i,)) => {
+                        warn!("unexpected service activation response {}", i);
+                        if let Some(r) = req.send_result {
+                            r.send(Value::Error(Chars::from(format!(
+                                "unexpected service activation response {}",
+                                i
+                            ))));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     async fn new(
         base: Path,
         publisher: Publisher,
@@ -1125,7 +1163,8 @@ async fn main() -> Result<()> {
         publisher.clone(),
         dbus.clone(),
         tx_activate,
-    ).await?;
+    )
+    .await?;
     let names = list_names(&dbus)
         .await?
         .into_iter()
@@ -1180,9 +1219,7 @@ async fn main() -> Result<()> {
                 }
             }
             req = rx_activate.select_next_some() => {
-                if let Err(e) = activatable.activate(req).await {
-                    warn!("could not activate service {}", e);
-                }
+                activatable.activate(req).await;
             }
             complete => break,
         }
