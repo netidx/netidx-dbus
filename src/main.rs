@@ -1079,9 +1079,9 @@ impl Activatable {
     async fn activate(&self, mut reqs: Pooled<Vec<WriteRequest>>) {
         for req in reqs.drain(..) {
             if let Some(name) = self.by_id.get(&req.id) {
-                let r: result::Result<(i32,), dbus::Error> = self
+                let r: result::Result<(u32,), dbus::Error> = self
                     .con
-                    .method_call("org.freedesktop.DBus", "StartServiceByName", (name, 0))
+                    .method_call("org.freedesktop.DBus", "StartServiceByName", (name, 0u32))
                     .await;
                 match r {
                     Err(e) => {
