@@ -850,6 +850,7 @@ impl Object {
                 let _: std::result::Result<_, _> = connection.remove_match(filter.token()).await;
             }
         };
+        let mut clients = Vec::new();
         let r = loop {
             let mut batch = publisher.start_batch();
             select_biased! {
@@ -860,7 +861,8 @@ impl Object {
                             .map(|(a, v)| (a.clone(), dbus_value_to_netidx_value(&v)))
                             .collect::<Vec<_>>()
                     );
-                    for cl in publisher.subscribed(&val.id()) {
+                    publisher.put_subscribed(&val.id(), &mut clients);
+                    for cl in clients.drain(..) {
                         val.update_subscriber(&mut batch, cl, elts.clone());
                     }
                 }

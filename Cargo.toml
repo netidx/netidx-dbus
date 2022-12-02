@@ -10,9 +10,9 @@ lto = true
 debug = false
 
 [dependencies]
-netidx-protocols = "0.12"
-netidx-tools-core = "0.12"
-netidx = "0.12"
+netidx-protocols = { version = "0.12", path = "../netidx/netidx-protocols" }
+netidx-tools-core = { version = "0.12", path = "../netidx/netidx-tools-core" }
+netidx = { version = "0.12", path = "../netidx/netidx" }
 dbus = {version = "0.9", features = ["futures"]}
 dbus-tokio = "0.7"
 serde = "1"
