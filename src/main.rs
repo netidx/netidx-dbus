@@ -75,6 +75,11 @@ struct Params {
         default_value = "/local/dbus"
     )]
     netidx_base: Path,
+    #[structopt(
+        long = "system",
+        help = "connect to the system bus instead of the session bus"
+    )]
+    system: bool,
 }
 
 async fn introspect(con: &Proxy<'_, Arc<SyncConnection>>) -> Result<xml::Node> {
@@ -1138,7 +1143,11 @@ async fn main() -> Result<()> {
     let opts = Params::from_args();
     let timeout = opts.timeout.map(Duration::from_secs);
     let (cfg, auth) = opts.common.load();
-    let (dbus, con) = dbus_tokio::connection::new_session_sync()?;
+    let (dbus, con) = if opts.system {
+        dbus_tokio::connection::new_system_sync()?
+    } else {
+        dbus_tokio::connection::new_session_sync()?
+    };
     con.set_signal_match_mode(true);
     task::spawn(async move {
         let res = dbus.await;
