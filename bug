@@ -1,0 +1,130 @@
+thread 'tokio-runtime-worker' panicked at 'called `Result::unwrap()` on an `Err` value: "Invalid ArgType 40 (()"', /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/dbus-0.9.6/src/arg/array_impl.rs:589:79
+stack backtrace:
+   0: rust_begin_unwind
+             at /rustc/897e37553bba8b42751c67658967889d11ecd120/library/std/src/panicking.rs:584:5
+   1: core::panicking::panic_fmt
+             at /rustc/897e37553bba8b42751c67658967889d11ecd120/library/core/src/panicking.rs:142:14
+   2: core::result::unwrap_failed
+             at /rustc/897e37553bba8b42751c67658967889d11ecd120/library/core/src/result.rs:1785:5
+   3: core::result::Result<T,E>::unwrap
+             at /rustc/897e37553bba8b42751c67658967889d11ecd120/library/core/src/result.rs:1107:23
+   4: dbus::arg::array_impl::get_array_refarg
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/dbus-0.9.6/src/arg/array_impl.rs:589:25
+   5: dbus::arg::Iter::get_refarg
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/dbus-0.9.6/src/arg/mod.rs:208:31
+   6: <dbus::arg::Iter as core::iter::traits::iterator::Iterator>::next
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/dbus-0.9.6/src/arg/mod.rs:324:17
+   7: <core::iter::adapters::zip::Zip<A,B> as core::iter::adapters::zip::ZipImpl<A,B>>::next
+             at /rustc/897e37553bba8b42751c67658967889d11ecd120/library/core/src/iter/adapters/zip.rs:155:21
+   8: <core::iter::adapters::zip::Zip<A,B> as core::iter::traits::iterator::Iterator>::next
+             at /rustc/897e37553bba8b42751c67658967889d11ecd120/library/core/src/iter/adapters/zip.rs:84:9
+   9: <core::iter::adapters::map::Map<I,F> as core::iter::traits::iterator::Iterator>::next
+             at /rustc/897e37553bba8b42751c67658967889d11ecd120/library/core/src/iter/adapters/map.rs:103:9
+  10: alloc::vec::Vec<T,A>::extend_desugared
+             at /rustc/897e37553bba8b42751c67658967889d11ecd120/library/alloc/src/vec/mod.rs:2749:35
+  11: <alloc::vec::Vec<T,A> as alloc::vec::spec_extend::SpecExtend<T,I>>::spec_extend
+             at /rustc/897e37553bba8b42751c67658967889d11ecd120/library/alloc/src/vec/spec_extend.rs:18:9
+  12: <alloc::vec::Vec<T> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<T,I>>::from_iter
+             at /rustc/897e37553bba8b42751c67658967889d11ecd120/library/alloc/src/vec/spec_from_iter_nested.rs:43:9
+  13: <alloc::vec::Vec<T> as alloc::vec::spec_from_iter::SpecFromIter<T,I>>::from_iter
+             at /rustc/897e37553bba8b42751c67658967889d11ecd120/library/alloc/src/vec/spec_from_iter.rs:33:9
+  14: <alloc::vec::Vec<T> as core::iter::traits::collect::FromIterator<T>>::from_iter
+             at /rustc/897e37553bba8b42751c67658967889d11ecd120/library/alloc/src/vec/mod.rs:2649:9
+  15: core::iter::traits::iterator::Iterator::collect
+             at /rustc/897e37553bba8b42751c67658967889d11ecd120/library/core/src/iter/traits/iterator.rs:1836:9
+  16: netidx_dbus::Object::publish_signal::{{closure}}
+             at ./src/main.rs:862:25
+  17: <core::future::from_generator::GenFuture<T> as core::future::future::Future>::poll
+             at /rustc/897e37553bba8b42751c67658967889d11ecd120/library/core/src/future/mod.rs:91:19
+  18: netidx_dbus::Object::publish_signals::{{closure}}
+             at ./src/main.rs:909:25
+  19: <core::future::from_generator::GenFuture<T> as core::future::future::Future>::poll
+             at /rustc/897e37553bba8b42751c67658967889d11ecd120/library/core/src/future/mod.rs:91:19
+  20: tokio::runtime::task::core::Core<T,S>::poll::{{closure}}
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/task/core.rs:208:17
+  21: tokio::loom::std::unsafe_cell::UnsafeCell<T>::with_mut
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/loom/std/unsafe_cell.rs:14:9
+  22: tokio::runtime::task::core::Core<T,S>::poll
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/task/core.rs:197:13
+  23: tokio::runtime::task::harness::poll_future::{{closure}}
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/task/harness.rs:483:19
+  24: <core::panic::unwind_safe::AssertUnwindSafe<F> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/897e37553bba8b42751c67658967889d11ecd120/library/core/src/panic/unwind_safe.rs:271:9
+  25: std::panicking::try::do_call
+             at /rustc/897e37553bba8b42751c67658967889d11ecd120/library/std/src/panicking.rs:492:40
+  26: __rust_try
+  27: std::panicking::try
+             at /rustc/897e37553bba8b42751c67658967889d11ecd120/library/std/src/panicking.rs:456:19
+  28: std::panic::catch_unwind
+             at /rustc/897e37553bba8b42751c67658967889d11ecd120/library/std/src/panic.rs:137:14
+  29: tokio::runtime::task::harness::poll_future
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/task/harness.rs:471:18
+  30: tokio::runtime::task::harness::Harness<T,S>::poll_inner
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/task/harness.rs:107:27
+  31: tokio::runtime::task::harness::Harness<T,S>::poll
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/task/harness.rs:61:15
+  32: tokio::runtime::task::raw::poll
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/task/raw.rs:194:5
+  33: tokio::runtime::task::raw::RawTask::poll
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/task/raw.rs:134:18
+  34: tokio::runtime::task::LocalNotified<S>::run
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/task/mod.rs:430:9
+  35: tokio::runtime::scheduler::multi_thread::worker::Context::run_task::{{closure}}
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/scheduler/multi_thread/worker.rs:462:21
+  36: tokio::runtime::coop::with_budget
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/coop.rs:102:5
+  37: tokio::runtime::coop::budget
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/coop.rs:68:5
+  38: tokio::runtime::scheduler::multi_thread::worker::Context::run_task
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/scheduler/multi_thread/worker.rs:438:9
+  39: tokio::runtime::scheduler::multi_thread::worker::Context::run
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/scheduler/multi_thread/worker.rs:405:24
+  40: tokio::runtime::scheduler::multi_thread::worker::run::{{closure}}
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/scheduler/multi_thread/worker.rs:390:17
+  41: tokio::macros::scoped_tls::ScopedKey<T>::set
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/macros/scoped_tls.rs:61:9
+  42: tokio::runtime::scheduler::multi_thread::worker::run
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/scheduler/multi_thread/worker.rs:387:5
+  43: tokio::runtime::scheduler::multi_thread::worker::Launch::launch::{{closure}}
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/scheduler/multi_thread/worker.rs:365:45
+  44: <tokio::runtime::blocking::task::BlockingTask<T> as core::future::future::Future>::poll
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/blocking/task.rs:42:21
+  45: tokio::runtime::task::core::Core<T,S>::poll::{{closure}}
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/task/core.rs:208:17
+  46: tokio::loom::std::unsafe_cell::UnsafeCell<T>::with_mut
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/loom/std/unsafe_cell.rs:14:9
+  47: tokio::runtime::task::core::Core<T,S>::poll
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/task/core.rs:197:13
+  48: tokio::runtime::task::harness::poll_future::{{closure}}
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/task/harness.rs:483:19
+  49: <core::panic::unwind_safe::AssertUnwindSafe<F> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/897e37553bba8b42751c67658967889d11ecd120/library/core/src/panic/unwind_safe.rs:271:9
+  50: std::panicking::try::do_call
+             at /rustc/897e37553bba8b42751c67658967889d11ecd120/library/std/src/panicking.rs:492:40
+  51: __rust_try
+  52: std::panicking::try
+             at /rustc/897e37553bba8b42751c67658967889d11ecd120/library/std/src/panicking.rs:456:19
+  53: std::panic::catch_unwind
+             at /rustc/897e37553bba8b42751c67658967889d11ecd120/library/std/src/panic.rs:137:14
+  54: tokio::runtime::task::harness::poll_future
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/task/harness.rs:471:18
+  55: tokio::runtime::task::harness::Harness<T,S>::poll_inner
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/task/harness.rs:107:27
+  56: tokio::runtime::task::harness::Harness<T,S>::poll
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/task/harness.rs:61:15
+  57: tokio::runtime::task::raw::poll
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/task/raw.rs:194:5
+  58: tokio::runtime::task::raw::RawTask::poll
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/task/raw.rs:134:18
+  59: tokio::runtime::task::UnownedTask<S>::run
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/task/mod.rs:467:9
+  60: tokio::runtime::blocking::pool::Task::run
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/blocking/pool.rs:159:9
+  61: tokio::runtime::blocking::pool::Inner::run
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/blocking/pool.rs:510:17
+  62: tokio::runtime::blocking::pool::Spawner::spawn_thread::{{closure}}
+             at /home/deck/.cargo/registry/src/github.com-1ecc6299db9ec823/tokio-1.22.0/src/runtime/blocking/pool.rs:468:13
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+org/freedesktop/DBus[2022-12-02T23:47:36Z WARN  netidx_dbus] properties publisher for uk.co.ibboard.cawbird:/org/gtk/Profiler stopped
+[2022-12-02T23:47:36Z WARN  netidx_dbus] properties publisher for uk.co.ibboard.cawbird:/uk/co/ibboard/cawbird stopped
+org/freedesktop/DBus
