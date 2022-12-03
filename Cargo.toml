@@ -2,6 +2,12 @@
 name = "netidx-dbus"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+description = "talk to dbus services with netidx"
+repository = "https://github.com/estokes/netidx-dbus"
+readme = "README.md"
+keywords = ["network", "networking", "distributed", "kerberos"]
+categories = ["network-programming"]
 
 [profile.release]
 codegen-units = 1
