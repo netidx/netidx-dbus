@@ -26,7 +26,7 @@ use futures::{
     select_biased,
 };
 use fxhash::{FxHashMap, FxHashSet};
-use log::{error, warn};
+use log::{error, warn, info};
 use netidx::{
     chars::Chars,
     path::Path,
@@ -1144,8 +1144,10 @@ async fn main() -> Result<()> {
     let timeout = opts.timeout.map(Duration::from_secs);
     let (cfg, auth) = opts.common.load();
     let (dbus, con) = if opts.system {
+        info!("connecting to the system bus");
         dbus_tokio::connection::new_system_sync()?
     } else {
+        info!("connecting to the session bus");
         dbus_tokio::connection::new_session_sync()?
     };
     con.set_signal_match_mode(true);
