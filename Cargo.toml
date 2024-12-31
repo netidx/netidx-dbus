@@ -1,6 +1,6 @@
 [package]
 name = "netidx-dbus"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 description = "talk to dbus services with netidx"
@@ -16,9 +16,9 @@ lto = true
 debug = false
 
 [dependencies]
-netidx-protocols = { version = "0.12" }
-netidx-tools-core = { version = "0.12" }
-netidx = { version = "^0.12.3" }
+netidx-protocols = { version = "0.27" }
+netidx-tools-core = { version = "0.27" }
+netidx = { version = "0.27" }
 dbus = {version = "0.9", features = ["futures"]}
 dbus-tokio = "0.7"
 serde = "1"
@@ -28,7 +28,8 @@ futures = "0.3"
 tokio = { version = "1", features = [ "full" ] }
 anyhow = "1"
 structopt = "0.3"
-env_logger = "0.9"
+env_logger = "0.11"
 log = "0.4"
 fxhash = "0.2"
 rand = "0.8"
+arcstr = "1.2.0"

@@ -3,6 +3,7 @@ extern crate serde_derive;
 
 mod xml;
 use anyhow::{anyhow, bail, Result};
+use arcstr::ArcStr;
 use dbus::{
     arg::{
         self,
@@ -26,15 +27,15 @@ use futures::{
     select_biased,
 };
 use fxhash::{FxHashMap, FxHashSet};
-use log::{error, warn, info};
+use log::{error, info, warn};
 use netidx::{
     chars::Chars,
     path::Path,
     pool::Pooled,
-    publisher::{BindCfg, Id, Publisher, Val, WriteRequest},
+    publisher::{BindCfg, Id, Publisher, PublisherBuilder, Val, WriteRequest},
     subscriber::Value,
 };
-use netidx_protocols::rpc::server as rpc;
+use netidx_protocols::rpc::server::{self as rpc, ArgSpec, RpcCall};
 use netidx_tools_core::ClientParams;
 use std::{
     boxed::Box,
@@ -271,6 +272,9 @@ fn netidx_value_to_dbus_value(v: &Value, typ: &DbusType) -> Result<MessageItem> 
                 (*f) as f64,
             )))),
             Value::F64(f) => Ok(MessageItem::Variant(Box::new(MessageItem::Double(*f)))),
+            Value::Decimal(d) => Ok(MessageItem::Variant(Box::new(MessageItem::Double(
+                (*d).try_into()?,
+            )))),
             Value::True | Value::Ok => Ok(MessageItem::Variant(Box::new(MessageItem::Bool(true)))),
             Value::False | Value::Error(_) | Value::Null => {
                 Ok(MessageItem::Variant(Box::new(MessageItem::Bool(false))))
@@ -471,18 +475,13 @@ impl AppendAll for DbusMethodArgs {
 }
 
 impl DbusMethodArgs {
-    fn new<'a>(
-        sig: &Vec<DbusMethodArgSpec>,
-        vals: &mut HashMap<Arc<str>, Pooled<Vec<Value>>>,
-    ) -> Result<Self> {
+    fn new<'a>(sig: &Vec<DbusMethodArgSpec>, vals: &mut HashMap<ArcStr, Value>) -> Result<Self> {
         let elts = sig
             .iter()
             .map(|a| {
                 let v = vals
                     .remove(a.name.as_ref().unwrap().as_str())
-                    .ok_or_else(|| anyhow!("missing argument"))?
-                    .pop()
-                    .ok_or_else(|| anyhow!("empty argument"))?;
+                    .ok_or_else(|| anyhow!("missing argument"))?;
                 netidx_value_to_dbus_value(&v, &a.typ)
             })
             .collect::<Result<Vec<_>>>()?;
@@ -521,7 +520,7 @@ impl ReadAll for DbusMethodRet {
     }
 }
 
-struct ProxiedMethod(rpc::Proc);
+struct ProxiedMethod(#[allow(unused)] rpc::Proc);
 
 impl ProxiedMethod {
     fn new(
@@ -592,28 +591,18 @@ impl ProxiedMethod {
             }
             desc
         };
-        let proc = rpc::Proc::new(
-            publisher,
-            base,
-            Value::from(desc),
-            spec.arg_spec
-                .iter()
-                .map(|a| {
-                    let name = Arc::from(a.name.as_ref().unwrap().as_str());
-                    let spec = (Value::Null, Value::from(a.typ.to_string()));
-                    (name, spec)
-                })
-                .collect(),
-            Arc::new(move |_clid, mut args| {
-                let spec = Arc::clone(&spec);
-                Box::pin(async move {
-                    match DbusMethodArgs::new(&spec.arg_spec, &mut *args) {
+        let (tx, mut rx) = mpsc::channel::<RpcCall>(3);
+        task::spawn({
+            let spec = spec.clone();
+            async move {
+                while let Some(mut proc) = rx.next().await {
+                    let res = match DbusMethodArgs::new(&spec.arg_spec, &mut *proc.args) {
                         Err(e) => Value::Error(Chars::from(format!(
                             "failed to construct dbus args: {}",
                             e
                         ))),
                         Ok(dargs) => {
-                            if !args.is_empty() {
+                            if !proc.args.is_empty() {
                                 warn!("ignoring extra args in method call")
                             }
                             let r: MethodReply<DbusMethodRet> =
@@ -625,9 +614,22 @@ impl ProxiedMethod {
                                 Ok(r) => r.0,
                             }
                         }
-                    }
-                })
+                    };
+                    proc.reply.send(res);
+                }
+            }
+        });
+        let proc = rpc::Proc::new(
+            publisher,
+            base,
+            Value::from(desc),
+            spec.arg_spec.iter().map(|a| ArgSpec {
+                name: ArcStr::from(a.name.as_ref().unwrap().as_str()),
+                doc: Value::from(a.typ.to_string()),
+                default_value: Value::Null,
             }),
+            |c| Some(c),
+            Some(tx),
         )?;
         Ok(Self(proc))
     }
@@ -1155,7 +1157,11 @@ async fn main() -> Result<()> {
         let res = dbus.await;
         error!("lost connection to dbus {}", res);
     });
-    let publisher = Publisher::new(cfg, auth, opts.bind).await?;
+    let publisher = PublisherBuilder::new(cfg)
+        .desired_auth(auth)
+        .bind_cfg(Some(opts.bind))
+        .build()
+        .await?;
     let base = opts.netidx_base.clone();
     let dbus = Proxy::new("org.freedesktop.DBus", "/", TIMEOUT, Arc::clone(&con));
     let dbus_signal_match = con
